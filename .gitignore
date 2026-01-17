@@ -1,6 +1,8 @@
 # Database
 bot.db
 *.db
+bot_data.json
+bot_data.json.lock
 
 # Environment variables
 .env

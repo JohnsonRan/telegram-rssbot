@@ -1,6 +1,5 @@
 python-telegram-bot[job-queue]
 feedparser
-SQLAlchemy
-APScheduler
 python-dotenv
 listparser
+filelock
