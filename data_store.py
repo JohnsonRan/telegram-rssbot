@@ -7,6 +7,9 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+# Configuration
+MAX_SEEN_ENTRIES = 5  # Only keep the most recent N seen entries per feed
+
 
 class DataStore:
     """JSON-based data storage for RSS bot with file locking for concurrency safety."""
@@ -216,30 +219,38 @@ class DataStore:
     
     # Seen entries operations
     def mark_entry_seen(self, feed_url: str, entry_link: str):
-        """Mark an entry as seen for a feed."""
+        """Mark an entry as seen for a feed. Only keeps the most recent N entries."""
         with self._lock():
             data = self._load()
             
             if feed_url not in data["feeds"]:
                 return
             
-            if entry_link not in data["feeds"][feed_url]["seen_entries"]:
-                data["feeds"][feed_url]["seen_entries"].append(entry_link)
+            seen_list = data["feeds"][feed_url]["seen_entries"]
+            
+            if entry_link not in seen_list:
+                seen_list.append(entry_link)
+                # Keep only the most recent MAX_SEEN_ENTRIES
+                if len(seen_list) > MAX_SEEN_ENTRIES:
+                    data["feeds"][feed_url]["seen_entries"] = seen_list[-MAX_SEEN_ENTRIES:]
                 self._save(data)
     
     def mark_entries_seen(self, feed_url: str, entry_links: List[str]):
-        """Mark multiple entries as seen for a feed."""
+        """Mark multiple entries as seen for a feed. Only keeps the most recent N entries."""
         with self._lock():
             data = self._load()
             
             if feed_url not in data["feeds"]:
                 return
             
-            seen_set = set(data["feeds"][feed_url]["seen_entries"])
+            seen_list = data["feeds"][feed_url]["seen_entries"]
+            seen_set = set(seen_list)
             new_links = [link for link in entry_links if link not in seen_set]
             
             if new_links:
-                data["feeds"][feed_url]["seen_entries"].extend(new_links)
+                seen_list.extend(new_links)
+                # Keep only the most recent MAX_SEEN_ENTRIES
+                data["feeds"][feed_url]["seen_entries"] = seen_list[-MAX_SEEN_ENTRIES:]
                 self._save(data)
                 logger.info(f"Marked {len(new_links)} entries as seen for {feed_url}")
     

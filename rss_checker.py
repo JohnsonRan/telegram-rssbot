@@ -6,6 +6,9 @@ from data_store import store
 
 logger = logging.getLogger(__name__)
 
+# Configuration
+MAX_ENTRIES_PER_UPDATE = 10  # Maximum entries to push per feed per check
+
 
 def fetch_and_process_feeds():
     """
@@ -50,24 +53,52 @@ def fetch_and_process_feeds():
                     if store.is_entry_seen(feed_url, link):
                         continue
                     
-                    # New entry! Mark as seen
-                    store.mark_entry_seen(feed_url, link)
+                    # New entry!
                     new_entries.append(entry)
                 
                 # Prepare messages for subscribers
                 if new_entries:
                     subscribers = store.get_feed_subscribers(feed_url)
                     
-                    # Send entries in chronological order (oldest first)
-                    for entry in reversed(new_entries):
-                        title = entry.get('title', 'No Title')
-                        link = entry.get('link', '')
-                        text = f"<b>{title}</b>\n{link}"
-                        
-                        for chat_id in subscribers:
-                            messages_to_send.append((chat_id, text))
+                    # Limit the number of entries to push to avoid spam
+                    entries_to_push = new_entries[:MAX_ENTRIES_PER_UPDATE] if len(new_entries) > MAX_ENTRIES_PER_UPDATE else new_entries
                     
-                    logger.info(f"Found {len(new_entries)} new entries in {feed_url} for {len(subscribers)} subscribers")
+                    # Mark all as seen (including the ones we won't push)
+                    for entry in new_entries:
+                        link = entry.get('link', '')
+                        if link:
+                            store.mark_entry_seen(feed_url, link)
+                    
+                    # Combine all entries into one message
+                    if entries_to_push:
+                        # Get feed title
+                        feed_title = feed_data.get('title', feed_url)
+                        
+                        # Build message with multiple entries
+                        message_lines = [f"📰 <b>{feed_title}</b>", ""]
+                        
+                        # Add entries in chronological order (oldest first)
+                        for entry in reversed(entries_to_push):
+                            title = entry.get('title', 'No Title')
+                            link = entry.get('link', '')
+                            message_lines.append(f"• <b>{title}</b>")
+                            message_lines.append(f"  {link}")
+                            message_lines.append("")  # Empty line between entries
+                        
+                        # Remove last empty line
+                        if message_lines[-1] == "":
+                            message_lines.pop()
+                        
+                        combined_message = "\n".join(message_lines)
+                        
+                        # Send one message per subscriber
+                        for chat_id in subscribers:
+                            messages_to_send.append((chat_id, combined_message))
+                    
+                    if len(new_entries) > MAX_ENTRIES_PER_UPDATE:
+                        logger.info(f"Found {len(new_entries)} new entries in {feed_url}, pushing {MAX_ENTRIES_PER_UPDATE}, skipping {len(new_entries) - MAX_ENTRIES_PER_UPDATE}")
+                    else:
+                        logger.info(f"Found {len(new_entries)} new entries in {feed_url} for {len(subscribers)} subscribers")
             
             except Exception as e:
                 logger.error(f"Error processing feed {feed_url}: {e}")
