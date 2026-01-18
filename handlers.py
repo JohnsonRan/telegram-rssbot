@@ -46,7 +46,12 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Validate feed by parsing it
-        d = await asyncio.to_thread(feedparser.parse, url)
+        # Use custom User-Agent to avoid 403 errors from some RSS sources
+        d = await asyncio.to_thread(
+            feedparser.parse, 
+            url,
+            agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
         
         # Check if feed is valid
         if not d.entries and not d.feed.get('title') and not d.version:
@@ -230,7 +235,11 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for url in newly_subscribed:
             try:
-                d = await asyncio.to_thread(feedparser.parse, url)
+                d = await asyncio.to_thread(
+                    feedparser.parse, 
+                    url,
+                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                )
                 marked_count = mark_feed_entries_as_seen(store, url, d)
                 total_entries_marked += marked_count
             except Exception as e:

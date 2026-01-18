@@ -23,8 +23,10 @@ def fetch_and_process_feeds():
         for feed_url, feed_data in feeds.items():
             try:
                 # Fetch feed with etag/modified for efficient updates
+                # Add User-Agent to avoid 403 errors from some RSS sources
                 d = feedparser.parse(
                     feed_url,
+                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     etag=feed_data.get('last_etag'),
                     modified=feed_data.get('last_modified')
                 )
