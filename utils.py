@@ -54,6 +54,42 @@ def require_permission(func):
     return wrapper
 
 
+def get_entry_id(entry):
+    """
+    Get a unique identifier for an RSS entry.
+    
+    Priority:
+    1. id/guid field (most reliable, e.g., kernel.org uses guid)
+    2. link field (traditional approach)
+    3. title + published combination (last resort)
+    
+    Args:
+        entry: feedparser entry object
+        
+    Returns:
+        str: Unique identifier for the entry
+    """
+    # Priority 1: Use id/guid (feedparser normalizes guid to id)
+    entry_id = entry.get('id', '').strip()
+    if entry_id:
+        return entry_id
+    
+    # Priority 2: Use link (traditional RSS)
+    link = entry.get('link', '').strip()
+    if link:
+        return link
+    
+    # Priority 3: Fallback to title + published
+    title = entry.get('title', 'untitled').strip()
+    published = entry.get('published', entry.get('updated', '')).strip()
+    
+    if published:
+        return f"{title}::{published}"
+    
+    # Last resort: just title (may cause duplicates)
+    return title
+
+
 def mark_feed_entries_as_seen(store, feed_url: str, feed_data: dict):
     """
     Mark all entries in a feed as seen.
@@ -66,17 +102,18 @@ def mark_feed_entries_as_seen(store, feed_url: str, feed_data: dict):
     if not feed_data.entries:
         return 0
     
-    entry_links = []
+    entry_ids = []
     for entry in feed_data.entries:
-        link = entry.get('link', '')
-        if link and not store.is_entry_seen(feed_url, link):
-            entry_links.append(link)
+        entry_id = get_entry_id(entry)
+        if entry_id and not store.is_entry_seen(feed_url, entry_id):
+            entry_ids.append(entry_id)
     
-    if entry_links:
-        store.mark_entries_seen(feed_url, entry_links)
-        logger.info(f"Marked {len(entry_links)} entries as seen for {feed_url}")
+    if entry_ids:
+        store.mark_entries_seen(feed_url, entry_ids)
+        logger.info(f"Marked {len(entry_ids)} entries as seen for {feed_url}")
     
-    return len(entry_links)
+    return len(entry_ids)
+
 
 
 class Messages:

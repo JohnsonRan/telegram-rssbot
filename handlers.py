@@ -50,12 +50,30 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d = await asyncio.to_thread(
             feedparser.parse, 
             url,
-            agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
         )
+        
+        # Check HTTP status if available
+        status = getattr(d, 'status', None)
+        if status and status >= 400:
+            # Delete the "Checking..." message and send http.cat image only
+            await msg.delete()
+            try:
+                await update.message.reply_photo(photo=f"https://http.cat/{status}")
+            except Exception:
+                # Fallback to simple text if image fails
+                await update.message.reply_text(f"❌ HTTP {status} 错误")
+            return
         
         # Check if feed is valid
         if not d.entries and not d.feed.get('title') and not d.version:
-            await msg.edit_text(Messages.INVALID_FEED)
+            error_msg = Messages.INVALID_FEED
+            if status:
+                error_msg += f" (HTTP {status})"
+            # Check if there's a bozo exception (parse error)
+            if hasattr(d, 'bozo') and d.bozo and hasattr(d, 'bozo_exception'):
+                error_msg += f"\n错误详情: {str(d.bozo_exception)[:100]}"
+            await msg.edit_text(error_msg)
             return
         
         feed_title = d.feed.get('title', url)
@@ -88,6 +106,7 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 Messages.SUBSCRIBED.format(feed_title),
                 parse_mode='HTML'
             )
+
     
     except Exception as e:
         logger.error(f"Error adding feed: {e}")
@@ -238,7 +257,7 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 d = await asyncio.to_thread(
                     feedparser.parse, 
                     url,
-                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
                 )
                 marked_count = mark_feed_entries_as_seen(store, url, d)
                 total_entries_marked += marked_count

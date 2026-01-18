@@ -3,6 +3,7 @@ import asyncio
 import logging
 
 from data_store import store
+from utils import get_entry_id
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def fetch_and_process_feeds():
                 # Add User-Agent to avoid 403 errors from some RSS sources
                 d = feedparser.parse(
                     feed_url,
-                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
                     etag=feed_data.get('last_etag'),
                     modified=feed_data.get('last_modified')
                 )
@@ -47,12 +48,12 @@ def fetch_and_process_feeds():
                 new_entries = []
                 
                 for entry in d.entries:
-                    link = entry.get('link', '')
-                    if not link:
+                    entry_id = get_entry_id(entry)
+                    if not entry_id:
                         continue
                     
                     # Check if we've seen this entry before
-                    if store.is_entry_seen(feed_url, link):
+                    if store.is_entry_seen(feed_url, entry_id):
                         continue
                     
                     # New entry!
@@ -67,9 +68,9 @@ def fetch_and_process_feeds():
                     
                     # Mark all as seen (including the ones we won't push)
                     for entry in new_entries:
-                        link = entry.get('link', '')
-                        if link:
-                            store.mark_entry_seen(feed_url, link)
+                        entry_id = get_entry_id(entry)
+                        if entry_id:
+                            store.mark_entry_seen(feed_url, entry_id)
                     
                     # Combine all entries into one message
                     if entries_to_push:
