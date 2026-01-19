@@ -7,9 +7,6 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-# Configuration
-MAX_SEEN_ENTRIES = 5  # Only keep the most recent N seen entries per feed
-
 
 class DataStore:
     """JSON-based data storage for RSS bot with file locking for concurrency safety."""
@@ -112,7 +109,7 @@ class DataStore:
                     "title": title or url,
                     "last_etag": etag,
                     "last_modified": modified,
-                    "seen_entries": []
+                    "last_check_time": None  # Timestamp of last check
                 }
                 self._save(data)
                 logger.info(f"Added new feed: {url}")
@@ -128,8 +125,8 @@ class DataStore:
             
             return data["feeds"][url]
     
-    def update_feed_metadata(self, url: str, etag: str = None, modified: str = None, title: str = None):
-        """Update feed metadata (etag, modified, title)."""
+    def update_feed_metadata(self, url: str, etag: str = None, modified: str = None, title: str = None, last_check_time: float = None):
+        """Update feed metadata (etag, modified, title, last_check_time)."""
         with self._lock():
             data = self._load()
             if url in data["feeds"]:
@@ -139,6 +136,8 @@ class DataStore:
                     data["feeds"][url]["last_modified"] = modified
                 if title is not None:
                     data["feeds"][url]["title"] = title
+                if last_check_time is not None:
+                    data["feeds"][url]["last_check_time"] = last_check_time
                 self._save(data)
     
     def get_all_feeds(self) -> Dict[str, dict]:
@@ -217,52 +216,22 @@ class DataStore:
             
             return subscribers
     
-    # Seen entries operations
-    def mark_entry_seen(self, feed_url: str, entry_link: str):
-        """Mark an entry as seen for a feed. Only keeps the most recent N entries."""
+    # Last check time operations
+    def get_last_check_time(self, feed_url: str) -> Optional[float]:
+        """Get the last check time for a feed."""
         with self._lock():
             data = self._load()
-            
             if feed_url not in data["feeds"]:
-                return
-            
-            seen_list = data["feeds"][feed_url]["seen_entries"]
-            
-            if entry_link not in seen_list:
-                seen_list.append(entry_link)
-                # Keep only the most recent MAX_SEEN_ENTRIES
-                if len(seen_list) > MAX_SEEN_ENTRIES:
-                    data["feeds"][feed_url]["seen_entries"] = seen_list[-MAX_SEEN_ENTRIES:]
-                self._save(data)
+                return None
+            return data["feeds"][feed_url].get("last_check_time")
     
-    def mark_entries_seen(self, feed_url: str, entry_links: List[str]):
-        """Mark multiple entries as seen for a feed. Only keeps the most recent N entries."""
+    def update_last_check_time(self, feed_url: str, timestamp: float):
+        """Update the last check time for a feed."""
         with self._lock():
             data = self._load()
-            
-            if feed_url not in data["feeds"]:
-                return
-            
-            seen_list = data["feeds"][feed_url]["seen_entries"]
-            seen_set = set(seen_list)
-            new_links = [link for link in entry_links if link not in seen_set]
-            
-            if new_links:
-                seen_list.extend(new_links)
-                # Keep only the most recent MAX_SEEN_ENTRIES
-                data["feeds"][feed_url]["seen_entries"] = seen_list[-MAX_SEEN_ENTRIES:]
+            if feed_url in data["feeds"]:
+                data["feeds"][feed_url]["last_check_time"] = timestamp
                 self._save(data)
-                logger.info(f"Marked {len(new_links)} entries as seen for {feed_url}")
-    
-    def is_entry_seen(self, feed_url: str, entry_link: str) -> bool:
-        """Check if an entry has been seen."""
-        with self._lock():
-            data = self._load()
-            
-            if feed_url not in data["feeds"]:
-                return False
-            
-            return entry_link in data["feeds"][feed_url].get("seen_entries", [])
 
 
 # Global instance

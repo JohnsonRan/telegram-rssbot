@@ -1,9 +1,9 @@
 import feedparser
 import asyncio
 import logging
+import time
 
 from data_store import store
-from utils import get_entry_id
 
 logger = logging.getLogger(__name__)
 
@@ -13,13 +13,14 @@ MAX_ENTRIES_PER_UPDATE = 10  # Maximum entries to push per feed per check
 
 def fetch_and_process_feeds():
     """
-    Fetch all feeds and check for new entries.
+    Fetch all feeds and check for new entries based on publish time.
     Returns a list of (chat_id, message) tuples to send.
     """
     messages_to_send = []
     
     try:
         feeds = store.get_all_feeds()
+        current_time = time.time()
         
         for feed_url, feed_data in feeds.items():
             try:
@@ -44,20 +45,41 @@ def fetch_and_process_feeds():
                 
                 store.update_feed_metadata(feed_url, etag=etag, modified=modified, title=title)
                 
-                # Check for new entries
+                # Get last check time
+                last_check_time = feed_data.get('last_check_time')
+                
+                # Check for new entries based on publish time
                 new_entries = []
                 
                 for entry in d.entries:
-                    entry_id = get_entry_id(entry)
-                    if not entry_id:
+                    # Get entry publish time
+                    entry_time = None
+                    
+                    # Try different time fields
+                    for time_field in ['published_parsed', 'updated_parsed', 'created_parsed']:
+                        if hasattr(entry, time_field) and getattr(entry, time_field):
+                            time_struct = getattr(entry, time_field)
+                            try:
+                                entry_time = time.mktime(time_struct)
+                                break
+                            except (ValueError, OverflowError):
+                                continue
+                    
+                    # If no time available or this is first check (no last_check_time), add entry
+                    if last_check_time is None:
+                        # First check - skip all existing entries (don't push history)
                         continue
                     
-                    # Check if we've seen this entry before
-                    if store.is_entry_seen(feed_url, entry_id):
+                    # If entry has no publish time, skip it (can't determine if it's new)
+                    if entry_time is None:
                         continue
                     
-                    # New entry!
-                    new_entries.append(entry)
+                    # Check if entry is newer than last check
+                    if entry_time > last_check_time:
+                        new_entries.append(entry)
+                
+                # Update last check time
+                store.update_last_check_time(feed_url, current_time)
                 
                 # Prepare messages for subscribers
                 if new_entries:
@@ -65,12 +87,6 @@ def fetch_and_process_feeds():
                     
                     # Limit the number of entries to push to avoid spam
                     entries_to_push = new_entries[:MAX_ENTRIES_PER_UPDATE] if len(new_entries) > MAX_ENTRIES_PER_UPDATE else new_entries
-                    
-                    # Mark all as seen (including the ones we won't push)
-                    for entry in new_entries:
-                        entry_id = get_entry_id(entry)
-                        if entry_id:
-                            store.mark_entry_seen(feed_url, entry_id)
                     
                     # Combine all entries into one message
                     if entries_to_push:

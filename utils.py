@@ -90,29 +90,19 @@ def get_entry_id(entry):
     return title
 
 
-def mark_feed_entries_as_seen(store, feed_url: str, feed_data: dict):
+def init_feed_check_time(store, feed_url: str):
     """
-    Mark all entries in a feed as seen.
+    Initialize the last check time for a newly added feed to current time.
+    This prevents pushing historical content.
     
     Args:
         store: DataStore instance
         feed_url: URL of the feed
-        feed_data: Parsed feedparser data
     """
-    if not feed_data.entries:
-        return 0
-    
-    entry_ids = []
-    for entry in feed_data.entries:
-        entry_id = get_entry_id(entry)
-        if entry_id and not store.is_entry_seen(feed_url, entry_id):
-            entry_ids.append(entry_id)
-    
-    if entry_ids:
-        store.mark_entries_seen(feed_url, entry_ids)
-        logger.info(f"Marked {len(entry_ids)} entries as seen for {feed_url}")
-    
-    return len(entry_ids)
+    import time
+    current_time = time.time()
+    store.update_last_check_time(feed_url, current_time)
+    logger.info(f"Initialized check time for {feed_url}")
 
 
 
@@ -133,7 +123,6 @@ class Messages:
     INVALID_FEED = "Invalid RSS feed or could not fetch."
     ALREADY_SUBSCRIBED = "You are already subscribed to this feed."
     SUBSCRIBED = "Subscribed to <b>{}</b>!"
-    SUBSCRIBED_WITH_COUNT = "Subscribed to <b>{}</b>! ({} existing entries marked as read)"
     
     # List feeds messages
     NO_SUBSCRIPTIONS = "No subscriptions found."
@@ -152,7 +141,6 @@ class Messages:
     IMPORT_NO_FEEDS = "No feeds found in file."
     IMPORTING = "Importing {} feeds..."
     IMPORT_SUCCESS = "Imported {} new feeds."
-    IMPORT_SUCCESS_WITH_ENTRIES = "Imported {} new feeds ({} existing entries marked as read)."
     IMPORT_FAILED = "Failed to process OPML file."
     
     # Error messages

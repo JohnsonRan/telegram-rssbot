@@ -9,7 +9,7 @@ import listparser
 from io import BytesIO
 
 from data_store import store
-from utils import require_permission, mark_feed_entries_as_seen, Messages
+from utils import require_permission, Messages
 
 logger = logging.getLogger(__name__)
 
@@ -93,19 +93,14 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Subscribe chat to feed
         store.subscribe(chat_id, url)
         
-        # Mark all existing entries as seen to avoid pushing history
-        marked_count = mark_feed_entries_as_seen(store, url, d)
+        # Initialize check time to avoid pushing history
+        from utils import init_feed_check_time
+        init_feed_check_time(store, url)
         
-        if marked_count > 0:
-            await msg.edit_text(
-                Messages.SUBSCRIBED_WITH_COUNT.format(feed_title, marked_count),
-                parse_mode='HTML'
-            )
-        else:
-            await msg.edit_text(
-                Messages.SUBSCRIBED.format(feed_title),
-                parse_mode='HTML'
-            )
+        await msg.edit_text(
+            Messages.SUBSCRIBED.format(feed_title),
+            parse_mode='HTML'
+        )
 
     
     except Exception as e:
@@ -249,28 +244,17 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 subscribed_count += 1
                 newly_subscribed.append(url)
         
-        # Mark existing entries as seen for newly subscribed feeds
-        total_entries_marked = 0
+        # Initialize check time for newly subscribed feeds
+        from utils import init_feed_check_time
         
         for url in newly_subscribed:
             try:
-                d = await asyncio.to_thread(
-                    feedparser.parse, 
-                    url,
-                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
-                )
-                marked_count = mark_feed_entries_as_seen(store, url, d)
-                total_entries_marked += marked_count
+                init_feed_check_time(store, url)
             except Exception as e:
-                logger.error(f"Error fetching feed {url} during import: {e}")
+                logger.error(f"Error initializing feed {url} during import: {e}")
         
         # Send result
-        if total_entries_marked > 0:
-            await status_msg.edit_text(
-                Messages.IMPORT_SUCCESS_WITH_ENTRIES.format(subscribed_count, total_entries_marked)
-            )
-        else:
-            await status_msg.edit_text(Messages.IMPORT_SUCCESS.format(subscribed_count))
+        await status_msg.edit_text(Messages.IMPORT_SUCCESS.format(subscribed_count))
     
     except Exception as e:
         logger.error(f"Import error: {e}")
