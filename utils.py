@@ -110,8 +110,8 @@ class Messages:
     """Centralized message text constants."""
     
     # Permission messages
-    UNAUTHORIZED = "⛔ You are not authorized to use this bot."
-    ADMIN_ONLY = "⛔ Only admins can configure the bot."
+    UNAUTHORIZED = "You are not authorized to use this bot."
+    ADMIN_ONLY = "Only admins can configure the bot."
     
     # Start/Help messages
     WELCOME_NEW = "Hello! I'm your RSS Bot. Use /add <url> to subscribe to a feed."

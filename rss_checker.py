@@ -94,14 +94,16 @@ def fetch_and_process_feeds():
                         feed_title = feed_data.get('title', feed_url)
                         
                         # Build message with multiple entries
-                        message_lines = [f"📰 <b>{feed_title}</b>", ""]
+                        message_lines = [f"<b>{feed_title}</b>", ""]
                         
                         # Add entries in chronological order (oldest first)
                         for entry in reversed(entries_to_push):
                             title = entry.get('title', 'No Title')
                             link = entry.get('link', '')
-                            message_lines.append(f"• <b>{title}</b>")
-                            message_lines.append(f"  {link}")
+                            if link:
+                                message_lines.append(f"• <b><a href=\"{link}\">{title}</a></b>")
+                            else:
+                                message_lines.append(f"• <b>{title}</b>")
                             message_lines.append("")  # Empty line between entries
                         
                         # Remove last empty line

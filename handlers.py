@@ -62,7 +62,7 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_photo(photo=f"https://http.cat/{status}")
             except Exception:
                 # Fallback to simple text if image fails
-                await update.message.reply_text(f"❌ HTTP {status} 错误")
+                await update.message.reply_text(f"HTTP {status} 错误")
             return
         
         # Check if feed is valid
@@ -122,7 +122,7 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text = Messages.SUBSCRIBED_FEEDS_HEADER
         for i, feed in enumerate(feeds, 1):
-            text += f"{i}. {feed['title']} ({feed['url']})\n"
+            text += f"{i}. <a href=\"{feed['url']}\">{feed['title']}</a>\n"
         
         await update.message.reply_text(text, parse_mode='HTML', disable_web_page_preview=True)
     
