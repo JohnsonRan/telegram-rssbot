@@ -175,6 +175,19 @@ class DataStore:
             
             if feed_url in data["chats"][chat_key]["feeds"]:
                 data["chats"][chat_key]["feeds"].remove(feed_url)
+                
+                # Check if this feed still has any subscribers
+                has_subscribers = False
+                for chat_data in data["chats"].values():
+                    if feed_url in chat_data.get("feeds", []):
+                        has_subscribers = True
+                        break
+                
+                # If no subscribers remain, remove the feed data
+                if not has_subscribers and feed_url in data["feeds"]:
+                    del data["feeds"][feed_url]
+                    logger.info(f"Feed {feed_url} removed (no remaining subscribers)")
+                
                 self._save(data)
                 logger.info(f"Chat {chat_id} unsubscribed from {feed_url}")
                 return True
