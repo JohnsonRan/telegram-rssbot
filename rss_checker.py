@@ -2,6 +2,7 @@ import feedparser
 import asyncio
 import logging
 import time
+import calendar
 
 from data_store import store
 
@@ -60,7 +61,8 @@ def fetch_and_process_feeds():
                         if hasattr(entry, time_field) and getattr(entry, time_field):
                             time_struct = getattr(entry, time_field)
                             try:
-                                entry_time = time.mktime(time_struct)
+                                # Use calendar.timegm for UTC time (feedparser returns UTC)
+                                entry_time = calendar.timegm(time_struct)
                                 break
                             except (ValueError, OverflowError):
                                 continue
