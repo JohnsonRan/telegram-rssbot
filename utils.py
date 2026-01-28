@@ -146,3 +146,8 @@ class Messages:
     # Error messages
     ERROR_OCCURRED = "An error occurred."
     ERROR_PROCESSING = "Error processing request."
+    
+    # nbnhhsh messages
+    NBNHHSH_USAGE = "用法：/nbnhhsh <缩写> 或回复一条消息使用 /nbnhhsh"
+    NBNHHSH_NO_RESULT = "未找到「{}」的翻译结果"
+    NBNHHSH_ERROR = "查询出错，请稍后再试"

@@ -7,6 +7,7 @@ from datetime import datetime
 import feedparser
 import listparser
 from io import BytesIO
+import httpx
 
 from data_store import store
 from utils import require_permission, Messages
@@ -259,3 +260,64 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Import error: {e}")
         await update.message.reply_text(Messages.IMPORT_FAILED)
+
+
+async def nbnhhsh_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /nbnhhsh command to translate pinyin abbreviations."""
+    text_to_translate = None
+    
+    # Check if user replied to a message
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        text_to_translate = update.message.reply_to_message.text
+    # Check if user provided text as argument
+    elif context.args:
+        text_to_translate = ' '.join(context.args)
+    else:
+        await update.message.reply_text(Messages.NBNHHSH_USAGE)
+        return
+    
+    try:
+        # Call nbnhhsh API
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                'https://lab.magiconch.com/api/nbnhhsh/guess',
+                json={'text': text_to_translate}
+            )
+            response.raise_for_status()
+            data = response.json()
+        
+        if not data:
+            await update.message.reply_text(Messages.NBNHHSH_NO_RESULT.format(text_to_translate))
+            return
+        
+        # Format results
+        result_lines = []
+        for item in data:
+            name = item.get('name', '')
+            trans = item.get('trans')
+            inputting = item.get('inputting')
+            
+            if trans:
+                # Has translations
+                translations = '、'.join(trans[:5])  # Limit to 5 results
+                result_lines.append(f"<b>{name}</b>: {translations}")
+            elif inputting:
+                # Has possible inputs
+                inputs = '、'.join(inputting[:5])
+                result_lines.append(f"<b>{name}</b>: 可能是 {inputs}")
+            else:
+                # No result
+                result_lines.append(f"<b>{name}</b>: 未找到释义")
+        
+        if result_lines:
+            result_text = '\n\n'.join(result_lines)
+            await update.message.reply_text(result_text, parse_mode='HTML')
+        else:
+            await update.message.reply_text(Messages.NBNHHSH_NO_RESULT.format(text_to_translate))
+    
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP error in nbnhhsh: {e}")
+        await update.message.reply_text(Messages.NBNHHSH_ERROR)
+    except Exception as e:
+        logger.error(f"Error in nbnhhsh: {e}")
+        await update.message.reply_text(Messages.NBNHHSH_ERROR)

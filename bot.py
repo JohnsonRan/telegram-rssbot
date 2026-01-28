@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler
 
 from data_store import store
-from handlers import start, add_feed, list_feeds, remove_feed, export_opml, import_opml
+from handlers import start, add_feed, list_feeds, remove_feed, export_opml, import_opml, nbnhhsh_translate
 from rss_checker import check_updates
 
 # Configure logging
@@ -35,6 +35,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove_feed))
     app.add_handler(CommandHandler("export", export_opml))
     app.add_handler(CommandHandler("import", import_opml))
+    app.add_handler(CommandHandler("nbnhhsh", nbnhhsh_translate))
 
     # Job Queue - Check feeds every 5 minutes
     if app.job_queue:

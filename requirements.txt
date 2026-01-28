@@ -3,3 +3,4 @@ feedparser
 python-dotenv
 listparser
 filelock
+httpx
