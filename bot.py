@@ -7,11 +7,21 @@ from data_store import store
 from handlers import start, add_feed, list_feeds, remove_feed, export_opml, import_opml, nbnhhsh_translate
 from rss_checker import check_updates
 
+# Custom filter to exclude api.telegram.org logs
+class TelegramAPIFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return 'api.telegram.org' not in message
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# Apply filter to httpx logger to exclude api.telegram.org requests
+httpx_logger = logging.getLogger('httpx')
+httpx_logger.addFilter(TelegramAPIFilter())
 
 load_dotenv()
 
