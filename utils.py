@@ -54,42 +54,6 @@ def require_permission(func):
     return wrapper
 
 
-def get_entry_id(entry):
-    """
-    Get a unique identifier for an RSS entry.
-    
-    Priority:
-    1. id/guid field (most reliable, e.g., kernel.org uses guid)
-    2. link field (traditional approach)
-    3. title + published combination (last resort)
-    
-    Args:
-        entry: feedparser entry object
-        
-    Returns:
-        str: Unique identifier for the entry
-    """
-    # Priority 1: Use id/guid (feedparser normalizes guid to id)
-    entry_id = entry.get('id', '').strip()
-    if entry_id:
-        return entry_id
-    
-    # Priority 2: Use link (traditional RSS)
-    link = entry.get('link', '').strip()
-    if link:
-        return link
-    
-    # Priority 3: Fallback to title + published
-    title = entry.get('title', 'untitled').strip()
-    published = entry.get('published', entry.get('updated', '')).strip()
-    
-    if published:
-        return f"{title}::{published}"
-    
-    # Last resort: just title (may cause duplicates)
-    return title
-
-
 def init_feed_check_time(store, feed_url: str):
     """
     Initialize the last check time for a newly added feed to current time.

@@ -85,6 +85,16 @@ class SQLiteStore:
         conn.commit()
         logger.info(f"Database initialized: {self.db_file}")
     
+    def close(self):
+        """Close the current thread's database connection."""
+        if hasattr(self._local, 'conn'):
+            try:
+                self._local.conn.close()
+                delattr(self._local, 'conn')
+                logger.info("Database connection closed")
+            except Exception as e:
+                logger.error(f"Error closing connection: {e}")
+    
     # Chat operations
     def get_chat(self, chat_id: int) -> Optional[dict]:
         """Get chat by ID."""
