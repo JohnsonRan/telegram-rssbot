@@ -60,7 +60,7 @@ async def fetch_and_process_feeds():
                     continue
                 
                 # Parse feed content
-                d = feedparser.parse(response.content)
+                d = await asyncio.to_thread(feedparser.parse, response.content)
                 
                 # Update feed metadata
                 etag = response.headers.get('ETag')
