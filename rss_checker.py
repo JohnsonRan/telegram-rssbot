@@ -3,6 +3,7 @@ import asyncio
 import logging
 import time
 import calendar
+import httpx
 
 from data_store import store
 
@@ -10,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 MAX_ENTRIES_PER_UPDATE = 10  # Maximum entries to push per feed per check
+FEED_TIMEOUT = 10.0  # Timeout for fetching each feed (seconds)
 
 
-def fetch_and_process_feeds():
+async def fetch_and_process_feeds():
     """
     Fetch all feeds and check for new entries based on publish time.
     Returns a list of (chat_id, message) tuples to send.
@@ -25,23 +27,44 @@ def fetch_and_process_feeds():
         
         for feed_url, feed_data in feeds.items():
             try:
-                # Fetch feed with etag/modified for efficient updates
-                # Add User-Agent to avoid 403 errors from some RSS sources
-                d = feedparser.parse(
-                    feed_url,
-                    agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-                    etag=feed_data.get('last_etag'),
-                    modified=feed_data.get('last_modified')
-                )
+                # Fetch feed with timeout using httpx
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+                }
                 
-                # Check if feed was modified
-                if hasattr(d, 'status') and d.status == 304:
+                # Add etag/modified headers if available
+                if feed_data.get('last_etag'):
+                    headers['If-None-Match'] = feed_data['last_etag']
+                if feed_data.get('last_modified'):
+                    headers['If-Modified-Since'] = feed_data['last_modified']
+                
+                # Fetch with timeout
+                async with httpx.AsyncClient(timeout=FEED_TIMEOUT, follow_redirects=True) as client:
+                    try:
+                        response = await client.get(feed_url, headers=headers)
+                    except httpx.TimeoutException:
+                        logger.warning(f"Timeout fetching {feed_url}")
+                        continue
+                    except httpx.HTTPError as e:
+                        logger.error(f"HTTP error fetching {feed_url}: {e}")
+                        continue
+                
+                # Check if feed was modified (304 Not Modified)
+                if response.status_code == 304:
                     # Not modified, skip
                     continue
                 
+                # Check for errors
+                if response.status_code >= 400:
+                    logger.warning(f"HTTP {response.status_code} for {feed_url}")
+                    continue
+                
+                # Parse feed content
+                d = feedparser.parse(response.content)
+                
                 # Update feed metadata
-                etag = getattr(d, 'etag', None)
-                modified = getattr(d, 'modified', None)
+                etag = response.headers.get('ETag')
+                modified = response.headers.get('Last-Modified')
                 title = d.feed.get('title', None)
                 
                 store.update_feed_metadata(feed_url, etag=etag, modified=modified, title=title)
@@ -134,10 +157,10 @@ def fetch_and_process_feeds():
 
 async def check_updates(context):
     """
-    Async job callback. Runs the sync fetcher in a thread and sends messages.
+    Async job callback. Fetches feeds and sends messages.
     """
-    # Run sync fetch in a separate thread to avoid blocking the asyncio loop
-    messages = await asyncio.to_thread(fetch_and_process_feeds)
+    # Fetch feeds asynchronously
+    messages = await fetch_and_process_feeds()
     
     # Send messages asynchronously
     for chat_id, text in messages:
