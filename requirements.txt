@@ -2,5 +2,4 @@ python-telegram-bot[job-queue]
 feedparser
 python-dotenv
 listparser
-filelock
 httpx
