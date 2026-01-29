@@ -15,7 +15,6 @@ from utils import require_permission, Messages
 logger = logging.getLogger(__name__)
 
 
-@require_permission
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start and /help commands."""
     chat_id = update.effective_chat.id
@@ -33,7 +32,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
-@require_permission
 async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /add command to subscribe to a feed."""
     chat_id = update.effective_chat.id
@@ -109,7 +107,6 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(Messages.ERROR_PROCESSING)
 
 
-@require_permission
 async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /list command to show all subscribed feeds."""
     chat_id = update.effective_chat.id
@@ -132,7 +129,6 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
-@require_permission
 async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove command to unsubscribe from a feed."""
     chat_id = update.effective_chat.id
@@ -162,7 +158,6 @@ async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
-@require_permission
 async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /export command to export feeds as OPML."""
     chat_id = update.effective_chat.id
@@ -194,7 +189,6 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
-@require_permission
 async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /import command to import feeds from OPML."""
     chat_id = update.effective_chat.id
@@ -277,14 +271,20 @@ async def nbnhhsh_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
+        # Get HTTP client from bot_data
+        http_client = context.bot_data.get('http_client')
+        if not http_client:
+            await update.message.reply_text("服务暂时不可用，请稍后再试")
+            logger.error("HTTP client not initialized in bot_data")
+            return
+        
         # Call nbnhhsh API
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                'https://lab.magiconch.com/api/nbnhhsh/guess',
-                json={'text': text_to_translate}
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await http_client.post(
+            'https://lab.magiconch.com/api/nbnhhsh/guess',
+            json={'text': text_to_translate}
+        )
+        response.raise_for_status()
+        data = response.json()
         
         if not data:
             await update.message.reply_text(Messages.NBNHHSH_NO_RESULT.format(text_to_translate))

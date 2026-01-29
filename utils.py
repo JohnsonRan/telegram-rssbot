@@ -5,7 +5,7 @@ import asyncio
 from functools import wraps
 from datetime import datetime
 from telegram import Update, ChatMember
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, filters
 import feedparser
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,42 @@ def require_permission(func):
         return await func(update, context, *args, **kwargs)
     
     return wrapper
+
+
+class AdminFilter(filters.MessageFilter):
+    """Custom filter to check if user has admin permissions."""
+    
+    def __init__(self):
+        super().__init__()
+        self.name = "AdminFilter"
+    
+    async def filter(self, message):
+        """Check if user has permission to use the command."""
+        user = message.from_user
+        chat = message.chat
+        
+        if not user:
+            return False
+        
+        # Private Chat: Whitelist check
+        if chat.type == 'private':
+            whitelist = get_whitelist()
+            return user.id in whitelist
+        
+        # Group/Channel: Admin check
+        if chat.type in ['group', 'supergroup', 'channel']:
+            try:
+                member = await chat.get_member(user.id)
+                return member.status in [ChatMember.OWNER, ChatMember.ADMINISTRATOR]
+            except Exception as e:
+                logger.error(f"Error checking permissions: {e}")
+                return False
+        
+        return False
+
+
+# Create filter instance
+admin_filter = AdminFilter()
 
 
 def init_feed_check_time(store, feed_url: str):

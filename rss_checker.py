@@ -15,15 +15,21 @@ FEED_TIMEOUT = 10.0  # Timeout for fetching each feed (seconds)
 MAX_CONCURRENT_FEEDS = 10  # Maximum number of feeds to fetch concurrently
 
 
-async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float):
+async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float, http_client):
     """
     Fetch and process a single feed.
     Returns a list of (chat_id, message) tuples to send.
+    
+    Args:
+        feed_url: URL of the feed to fetch
+        feed_data: Feed metadata from database
+        current_time: Current timestamp
+        http_client: Shared HTTP client instance
     """
     messages_to_send = []
     
     try:
-        # Fetch feed with timeout using httpx
+        # Fetch feed with timeout using shared httpx client
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
         }
@@ -34,16 +40,15 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float)
         if feed_data.get('last_modified'):
             headers['If-Modified-Since'] = feed_data['last_modified']
         
-        # Fetch with timeout
-        async with httpx.AsyncClient(timeout=FEED_TIMEOUT, follow_redirects=True) as client:
-            try:
-                response = await client.get(feed_url, headers=headers)
-            except httpx.TimeoutException:
-                logger.warning(f"Timeout fetching {feed_url}")
-                return messages_to_send
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error fetching {feed_url}: {e}")
-                return messages_to_send
+        # Fetch with timeout using shared client
+        try:
+            response = await http_client.get(feed_url, headers=headers)
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout fetching {feed_url}")
+            return messages_to_send
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error fetching {feed_url}: {e}")
+            return messages_to_send
         
         # Check if feed was modified (304 Not Modified)
         if response.status_code == 304:
@@ -148,10 +153,13 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float)
     return messages_to_send
 
 
-async def fetch_and_process_feeds():
+async def fetch_and_process_feeds(http_client):
     """
     Fetch all feeds concurrently and check for new entries based on publish time.
     Returns a list of (chat_id, message) tuples to send.
+    
+    Args:
+        http_client: Shared HTTP client instance for fetching feeds
     """
     messages_to_send = []
     
@@ -168,7 +176,7 @@ async def fetch_and_process_feeds():
         async def limited_fetch(feed_url: str, feed_data: dict):
             """Fetch a single feed with concurrency limit."""
             async with semaphore:
-                return await fetch_single_feed(feed_url, feed_data, current_time)
+                return await fetch_single_feed(feed_url, feed_data, current_time, http_client)
         
         # Create tasks for all feeds
         tasks = [
@@ -198,8 +206,14 @@ async def check_updates(context):
     """
     Async job callback. Fetches feeds and sends messages.
     """
+    # Get RSS HTTP client from bot_data
+    http_client = context.bot_data.get('rss_http_client')
+    if not http_client:
+        logger.error("RSS HTTP client not initialized in bot_data")
+        return
+    
     # Fetch feeds asynchronously
-    messages = await fetch_and_process_feeds()
+    messages = await fetch_and_process_feeds(http_client)
     
     # Send messages asynchronously
     for chat_id, text in messages:
