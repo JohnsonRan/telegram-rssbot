@@ -82,6 +82,29 @@ class SQLiteStore:
             ON subscriptions(feed_url)
         """)
         
+        # Create message_history table for deduplication
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                feed_url TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                UNIQUE(title, feed_url, chat_id)
+            )
+        """)
+        
+        # Create indexes for efficient querying
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_message_history_timestamp 
+            ON message_history(timestamp)
+        """)
+        
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_message_history_lookup 
+            ON message_history(title, feed_url, chat_id)
+        """)
+        
         conn.commit()
         logger.info(f"Database initialized: {self.db_file}")
     
@@ -373,6 +396,61 @@ class SQLiteStore:
                 "UPDATE feeds SET last_check_time = ? WHERE url = ?",
                 (timestamp, feed_url)
             )
+    
+    # Message deduplication operations
+    def check_message_duplicate(self, title: str, feed_url: str, chat_id: int) -> bool:
+        """
+        检查消息是否在过去一小时内已推送过。
+        
+        Args:
+            title: 消息标题
+            feed_url: RSS feed URL
+            chat_id: 聊天 ID
+            
+        Returns:
+            True 表示重复（应该忽略），False 表示不重复（应该推送）
+        """
+        import time
+        conn = self._get_connection()
+        one_hour_ago = time.time() - 3600  # 一小时 = 3600 秒
+        
+        cursor = conn.execute("""
+            SELECT 1 FROM message_history 
+            WHERE title = ? AND feed_url = ? AND chat_id = ? AND timestamp > ?
+            LIMIT 1
+        """, (title, feed_url, chat_id, one_hour_ago))
+        
+        return cursor.fetchone() is not None
+    
+    def record_message(self, title: str, feed_url: str, chat_id: int):
+        """
+        记录已推送的消息。
+        
+        Args:
+            title: 消息标题
+            feed_url: RSS feed URL
+            chat_id: 聊天 ID
+        """
+        import time
+        with self._transaction() as conn:
+            # 使用 INSERT OR REPLACE 处理重复
+            conn.execute("""
+                INSERT OR REPLACE INTO message_history (title, feed_url, chat_id, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (title, feed_url, chat_id, time.time()))
+    
+    def cleanup_old_messages(self):
+        """清理超过一小时的消息历史记录，保持数据库轻量。"""
+        import time
+        with self._transaction() as conn:
+            one_hour_ago = time.time() - 3600
+            cursor = conn.execute(
+                "DELETE FROM message_history WHERE timestamp < ?",
+                (one_hour_ago,)
+            )
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old message records")
 
 
 # Global instance

@@ -114,33 +114,48 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
             # Limit the number of entries to push to avoid spam
             entries_to_push = new_entries[:MAX_ENTRIES_PER_UPDATE] if len(new_entries) > MAX_ENTRIES_PER_UPDATE else new_entries
             
-            # Combine all entries into one message
-            if entries_to_push:
-                # Get feed title
-                feed_title = feed_data.get('title', feed_url)
-                
-                # Build message with multiple entries
-                message_lines = [f"<b>{feed_title}</b>", ""]
-                
-                # Add entries in chronological order (oldest first)
-                for entry in reversed(entries_to_push):
+            # Get feed title
+            feed_title = feed_data.get('title', feed_url)
+            
+            # Process each subscriber separately for deduplication
+            total_filtered = 0
+            for chat_id in subscribers:
+                # Filter entries for this subscriber (check for duplicates)
+                filtered_entries = []
+                for entry in reversed(entries_to_push):  # Oldest first
                     title = entry.get('title', 'No Title')
-                    link = entry.get('link', '')
-                    if link:
-                        message_lines.append(f"• <b><a href=\"{link}\">{title}</a></b>")
+                    
+                    # Check if this message was already sent to this chat in the past hour
+                    if not store.check_message_duplicate(title, feed_url, chat_id):
+                        filtered_entries.append(entry)
+                        # Record this message for deduplication
+                        store.record_message(title, feed_url, chat_id)
                     else:
-                        message_lines.append(f"• <b>{title}</b>")
-                    message_lines.append("")  # Empty line between entries
+                        total_filtered += 1
+                        logger.debug(f"Skipping duplicate message '{title}' for chat {chat_id}")
                 
-                # Remove last empty line
-                if message_lines[-1] == "":
-                    message_lines.pop()
-                
-                combined_message = "\n".join(message_lines)
-                
-                # Send one message per subscriber
-                for chat_id in subscribers:
+                # Build and send message if there are non-duplicate entries
+                if filtered_entries:
+                    message_lines = [f"<b>{feed_title}</b>", ""]
+                    
+                    for entry in filtered_entries:
+                        title = entry.get('title', 'No Title')
+                        link = entry.get('link', '')
+                        if link:
+                            message_lines.append(f"• <b><a href=\"{link}\">{title}</a></b>")
+                        else:
+                            message_lines.append(f"• <b>{title}</b>")
+                        message_lines.append("")  # Empty line between entries
+                    
+                    # Remove last empty line
+                    if message_lines[-1] == "":
+                        message_lines.pop()
+                    
+                    combined_message = "\n".join(message_lines)
                     messages_to_send.append((chat_id, combined_message))
+            
+            if total_filtered > 0:
+                logger.info(f"Filtered {total_filtered} duplicate messages from {feed_url}")
             
             if len(new_entries) > MAX_ENTRIES_PER_UPDATE:
                 logger.info(f"Found {len(new_entries)} new entries in {feed_url}, pushing {MAX_ENTRIES_PER_UPDATE}, skipping {len(new_entries) - MAX_ENTRIES_PER_UPDATE}")
@@ -206,6 +221,12 @@ async def check_updates(context):
     """
     Async job callback. Fetches feeds and sends messages.
     """
+    # Clean up old message history records first
+    try:
+        store.cleanup_old_messages()
+    except Exception as e:
+        logger.error(f"Error cleaning up old messages: {e}")
+    
     # Get RSS HTTP client from bot_data
     http_client = context.bot_data.get('rss_http_client')
     if not http_client:
