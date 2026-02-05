@@ -21,9 +21,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = update.effective_chat.title or update.effective_chat.username or str(chat_id)
     
     try:
-        chat = store.get_chat(chat_id)
+        chat = store.chats.get(chat_id)
         if not chat:
-            store.add_chat(chat_id, title)
+            store.chats.create(Chat(id=chat_id, title=title))
             await update.message.reply_text(Messages.WELCOME_NEW)
         else:
             await update.message.reply_text(Messages.WELCOME_BACK)
@@ -78,19 +78,21 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         feed_title = d.feed.get('title', url)
         
         # Ensure chat exists
+        from data_store import Chat
         chat_title = update.effective_chat.title or update.effective_chat.username or str(chat_id)
-        store.add_chat(chat_id, chat_title)
+        store.chats.create(Chat(id=chat_id, title=chat_title))
         
         # Check if already subscribed
-        if store.is_subscribed(chat_id, url):
+        if store.subscriptions.is_subscribed(chat_id, url):
             await msg.edit_text(Messages.ALREADY_SUBSCRIBED)
             return
         
         # Add feed to database
-        store.add_feed(url, title=feed_title)
+        from data_store import Feed
+        store.feeds.create(Feed(url=url, title=feed_title))
         
         # Subscribe chat to feed
-        store.subscribe(chat_id, url)
+        store.subscriptions.subscribe(chat_id, url)
         
         # Initialize check time to avoid pushing history
         from utils import init_feed_check_time
@@ -112,7 +114,7 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     try:
-        feeds = store.get_chat_feeds(chat_id)
+        feeds = store.subscriptions.get_chat_feeds(chat_id)
         
         if not feeds:
             await update.message.reply_text(Messages.NO_SUBSCRIPTIONS)
@@ -120,7 +122,7 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         text = Messages.SUBSCRIBED_FEEDS_HEADER
         for i, feed in enumerate(feeds, 1):
-            text += f"{i}. <a href=\"{feed['url']}\">{feed['title']}</a>\n"
+            text += f"{i}. <a href=\"{feed.url}\">{feed.title}</a>\n"
         
         await update.message.reply_text(text, parse_mode='HTML', disable_web_page_preview=True)
     
@@ -141,16 +143,16 @@ async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Check if subscribed
-        if not store.is_subscribed(chat_id, url):
+        if not store.subscriptions.is_subscribed(chat_id, url):
             await update.message.reply_text(Messages.NOT_SUBSCRIBED)
             return
         
         # Get feed info before unsubscribing
-        feed = store.get_feed(url)
-        feed_title = feed['title'] if feed else url
+        feed = store.feeds.get(url)
+        feed_title = feed.title if feed else url
         
         # Unsubscribe
-        store.unsubscribe(chat_id, url)
+        store.subscriptions.unsubscribe(chat_id, url)
         await update.message.reply_text(Messages.UNSUBSCRIBED.format(feed_title))
     
     except Exception as e:
@@ -163,7 +165,7 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     try:
-        feeds = store.get_chat_feeds(chat_id)
+        feeds = store.subscriptions.get_chat_feeds(chat_id)
         
         if not feeds:
             await update.message.reply_text(Messages.NOTHING_TO_EXPORT)
@@ -173,8 +175,8 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         opml_content = '<?xml version="1.0" encoding="UTF-8"?>\n<opml version="1.0">\n<head><title>RSS Export</title></head>\n<body>\n'
         
         for feed in feeds:
-            title = feed['title'].replace('&', '&amp;').replace('"', '&quot;')
-            url = feed['url'].replace('&', '&amp;').replace('"', '&quot;')
+            title = feed.title.replace('&', '&amp;').replace('"', '&quot;')
+            url = feed.url.replace('&', '&amp;').replace('"', '&quot;')
             opml_content += f'  <outline text="{title}" title="{title}" type="rss" xmlUrl="{url}"/>\n'
         
         opml_content += '</body>\n</opml>'
@@ -217,8 +219,9 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Ensure chat exists
+        from data_store import Chat
         chat_title = update.effective_chat.title or update.effective_chat.username or str(chat_id)
-        store.add_chat(chat_id, chat_title)
+        store.chats.create(Chat(id=chat_id, title=chat_title))
         
         status_msg = await update.message.reply_text(Messages.IMPORTING.format(len(parsed.feeds)))
         
@@ -232,10 +235,11 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             
             # Add feed
-            store.add_feed(url, title=item.title or url)
+            from data_store import Feed
+            store.feeds.create(Feed(url=url, title=item.title or url))
             
             # Subscribe if not already
-            if store.subscribe(chat_id, url):
+            if store.subscriptions.subscribe(chat_id, url):
                 subscribed_count += 1
                 newly_subscribed.append(url)
         

@@ -68,7 +68,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
         modified = response.headers.get('Last-Modified')
         title = d.feed.get('title', None)
         
-        store.update_feed_metadata(feed_url, etag=etag, modified=modified, title=title)
+        store.feeds.update(feed_url, last_etag=etag, last_modified=modified, title=title)
         
         # Get last check time
         last_check_time = feed_data.get('last_check_time')
@@ -105,11 +105,11 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
                 new_entries.append(entry)
         
         # Update last check time
-        store.update_last_check_time(feed_url, current_time)
+        store.feeds.update(feed_url, last_check_time=current_time)
         
         # Prepare messages for subscribers
         if new_entries:
-            subscribers = store.get_feed_subscribers(feed_url)
+            subscribers = store.subscriptions.get_feed_subscribers(feed_url)
             
             # Limit the number of entries to push to avoid spam
             entries_to_push = new_entries[:MAX_ENTRIES_PER_UPDATE] if len(new_entries) > MAX_ENTRIES_PER_UPDATE else new_entries
@@ -126,10 +126,10 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
                     title = entry.get('title', 'No Title')
                     
                     # Check if this message was already sent to this chat in the past hour
-                    if not store.check_message_duplicate(title, feed_url, chat_id):
+                    if not store.messages.is_duplicate(title, feed_url, chat_id):
                         filtered_entries.append(entry)
                         # Record this message for deduplication
-                        store.record_message(title, feed_url, chat_id)
+                        store.messages.record(title, feed_url, chat_id)
                     else:
                         total_filtered += 1
                         logger.debug(f"Skipping duplicate message '{title}' for chat {chat_id}")
@@ -223,7 +223,7 @@ async def check_updates(context):
     """
     # Clean up old message history records first
     try:
-        store.cleanup_old_messages()
+        store.messages.cleanup_old()
     except Exception as e:
         logger.error(f"Error cleaning up old messages: {e}")
     

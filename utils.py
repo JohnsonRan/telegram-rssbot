@@ -101,7 +101,7 @@ def init_feed_check_time(store, feed_url: str):
     """
     import time
     current_time = time.time()
-    store.update_last_check_time(feed_url, current_time)
+    store.feeds.update(feed_url, last_check_time=current_time)
     logger.info(f"Initialized check time for {feed_url}")
 
 
