@@ -35,10 +35,10 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
         }
         
         # Add etag/modified headers if available
-        if feed_data.get('last_etag'):
-            headers['If-None-Match'] = feed_data['last_etag']
-        if feed_data.get('last_modified'):
-            headers['If-Modified-Since'] = feed_data['last_modified']
+        if feed_data.last_etag:
+            headers['If-None-Match'] = feed_data.last_etag
+        if feed_data.last_modified:
+            headers['If-Modified-Since'] = feed_data.last_modified
         
         # Fetch with timeout using shared client
         try:
@@ -71,7 +71,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
         store.feeds.update(feed_url, last_etag=etag, last_modified=modified, title=title)
         
         # Get last check time
-        last_check_time = feed_data.get('last_check_time')
+        last_check_time = feed_data.last_check_time
         
         # Check for new entries based on publish time
         new_entries = []
@@ -115,7 +115,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
             entries_to_push = new_entries[:MAX_ENTRIES_PER_UPDATE] if len(new_entries) > MAX_ENTRIES_PER_UPDATE else new_entries
             
             # Get feed title
-            feed_title = feed_data.get('title', feed_url)
+            feed_title = feed_data.title if feed_data.title else feed_url
             
             # Process each subscriber separately for deduplication
             total_filtered = 0
@@ -179,7 +179,7 @@ async def fetch_and_process_feeds(http_client):
     messages_to_send = []
     
     try:
-        feeds = store.get_all_feeds()
+        feeds = store.feeds.get_all()
         current_time = time.time()
         
         if not feeds:
