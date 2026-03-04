@@ -4,6 +4,7 @@ import logging
 import time
 import calendar
 import httpx
+import random
 
 from data_store import store
 
@@ -189,7 +190,9 @@ async def fetch_and_process_feeds(http_client):
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_FEEDS)
         
         async def limited_fetch(feed_url: str, feed_data: dict):
-            """Fetch a single feed with concurrency limit."""
+            """Fetch a single feed with concurrency limit and random delay."""
+            # 增加 0 到 5 秒的随机延迟，避免瞬间并发过高导致超时
+            await asyncio.sleep(random.uniform(0, 5.0))
             async with semaphore:
                 return await fetch_single_feed(feed_url, feed_data, current_time, http_client)
         
