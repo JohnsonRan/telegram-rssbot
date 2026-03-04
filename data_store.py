@@ -296,11 +296,10 @@ class MessageHistoryOperations(_BaseOperations):
     """消息去重相关的数据库操作"""
     
     # 去重时间窗口（秒）
-    DEDUP_WINDOW = 3600  # 1 小时
+    DEDUP_WINDOW = 5400  # 1.5 小时
     
     def is_duplicate(self, title: str, feed_url: str, chat_id: int) -> bool:
-        """检查消息是否为重复（一小时内已推送过）"""
-        conn = self._get_conn()
+        """检查消息是否为重复（去重时间窗口内已推送过）"""
         cutoff_time = time.time() - self.DEDUP_WINDOW
         
         return self._exists(
