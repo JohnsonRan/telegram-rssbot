@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from data_store import store
 from handlers import start, add_feed, list_feeds, remove_feed, export_opml, import_opml
 from rss_checker import check_updates
-from utils import admin_filter
+from utils import FEED_REQUEST_TIMEOUT, admin_filter
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def main():
         import httpx
         # HTTP client for RSS feed fetching with longer timeout and redirects
         application.bot_data['rss_http_client'] = httpx.AsyncClient(
-            timeout=10.0,
+            timeout=FEED_REQUEST_TIMEOUT,
             follow_redirects=True
         )
         logger.info("RSS HTTP client initialized")
@@ -102,3 +102,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

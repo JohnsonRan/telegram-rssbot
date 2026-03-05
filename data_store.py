@@ -8,7 +8,7 @@ import time
 import sqlite3
 import logging
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 from dataclasses import dataclass, asdict
 from contextlib import contextmanager
 from threading import local
@@ -312,10 +312,45 @@ class MessageHistoryOperations(_BaseOperations):
         """记录已推送的消息"""
         with self._transaction() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO message_history 
-                (title, feed_url, chat_id, timestamp)
+                INSERT INTO message_history (title, feed_url, chat_id, timestamp)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(title, feed_url, chat_id)
+                DO UPDATE SET timestamp = excluded.timestamp
             """, (title, feed_url, chat_id, time.time()))
+    
+    def filter_and_record_batch(self, feed_url: str, chat_id: int, titles: List[str]) -> Set[str]:
+        """批量过滤重复消息并记录新消息，返回本次允许推送的标题集合"""
+        if not titles:
+            return set()
+        
+        # 在单次批处理中去重，避免同标题重复推送
+        unique_titles = list(dict.fromkeys(titles))
+        cutoff_time = time.time() - self.DEDUP_WINDOW
+        
+        placeholders = ", ".join("?" for _ in unique_titles)
+        query = f"""
+            SELECT title FROM message_history
+            WHERE feed_url = ? AND chat_id = ? AND timestamp > ?
+              AND title IN ({placeholders})
+        """
+        params = [feed_url, chat_id, cutoff_time, *unique_titles]
+        conn = self._get_conn()
+        existing_titles = {row["title"] for row in conn.execute(query, params)}
+        
+        new_titles = [title for title in unique_titles if title not in existing_titles]
+        if not new_titles:
+            return set()
+        
+        now = time.time()
+        with self._transaction() as conn:
+            conn.executemany("""
+                INSERT INTO message_history (title, feed_url, chat_id, timestamp)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(title, feed_url, chat_id)
+                DO UPDATE SET timestamp = excluded.timestamp
+            """, [(title, feed_url, chat_id, now) for title in new_titles])
+        
+        return set(new_titles)
     
     def cleanup_old(self, window_seconds: Optional[int] = None) -> int:
         """清理过期的消息记录，返回删除的记录数"""
