@@ -29,19 +29,25 @@ def _truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 3] + "..."
 
 
+def _remove_blank_lines(text: str, joiner: str = " ") -> str:
+    parts = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return joiner.join(parts)
+
+
 def _build_feed_messages(feed_title: str, entries) -> list[str]:
     """Build one or more Telegram-safe HTML messages for a feed update."""
-    safe_feed_title = escape(_truncate_text((feed_title or "Untitled Feed").strip(), 256), quote=False)
+    normalized_feed_title = _remove_blank_lines(feed_title or "Untitled Feed", joiner=" ").strip() or "Untitled Feed"
+    safe_feed_title = escape(_truncate_text(normalized_feed_title, 256), quote=False)
     header = f"<b>{safe_feed_title}</b>"
 
     messages = []
-    current_message = f"{header}\n\n"
+    current_message = f"{header}\n"
 
     for entry in entries:
-        raw_title = (entry.get("title") or "No Title").strip() or "No Title"
+        raw_title = _remove_blank_lines(entry.get("title") or "No Title", joiner=" ").strip() or "No Title"
         safe_title = escape(_truncate_text(raw_title, MAX_ENTRY_TITLE_LENGTH), quote=False)
 
-        raw_link = (entry.get("link") or "").strip()
+        raw_link = _remove_blank_lines(entry.get("link") or "", joiner="").strip()
         safe_link = escape(_truncate_text(raw_link, MAX_ENTRY_LINK_LENGTH), quote=True)
 
         if safe_link:
@@ -49,10 +55,10 @@ def _build_feed_messages(feed_title: str, entries) -> list[str]:
         else:
             entry_line = f"• <b>{safe_title}</b>"
 
-        block = f"{entry_line}\n\n"
+        block = f"{entry_line}\n"
         if len(current_message) + len(block) > MAX_TELEGRAM_MESSAGE_LENGTH:
             messages.append(current_message.rstrip())
-            current_message = f"{header}\n\n{block}"
+            current_message = f"{header}\n{block}"
         else:
             current_message += block
 
