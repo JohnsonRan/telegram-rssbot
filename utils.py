@@ -1,8 +1,11 @@
 import asyncio
+import calendar
+import hashlib
 import logging
 import os
+import time
 from functools import wraps
-from typing import Optional
+from typing import Iterable, Optional
 
 import httpx
 from telegram import ChatMember, Update
@@ -16,6 +19,7 @@ FEED_REQUEST_TIMEOUT = 10.0
 FEED_FETCH_RETRIES = 2
 FEED_RETRY_BACKOFF_SECONDS = 0.6
 FEED_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+ENTRY_TIME_FIELDS = ("published_parsed", "updated_parsed", "created_parsed")
 
 
 def build_feed_request_headers(last_etag: Optional[str] = None, last_modified: Optional[str] = None) -> dict:
@@ -88,6 +92,79 @@ async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, header
         raise last_error
 
     raise RuntimeError(f"Failed to fetch feed: {url}")
+
+
+def normalize_multiline_text(text: str, joiner: str = " ") -> str:
+    """Collapse multi-line text into a single normalized string."""
+    parts = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return joiner.join(parts)
+
+
+def normalize_entry_title(entry) -> str:
+    """Return a safe, normalized title for a feed entry."""
+    title = normalize_multiline_text(entry.get("title") or "No Title", joiner=" ").strip()
+    return title or "No Title"
+
+
+def extract_entry_time(entry) -> Optional[int]:
+    """Extract a UTC timestamp from a parsed feed entry if one exists."""
+    for time_field in ENTRY_TIME_FIELDS:
+        time_struct = entry.get(time_field) or getattr(entry, time_field, None)
+        if not time_struct:
+            continue
+
+        try:
+            return calendar.timegm(time_struct)
+        except (ValueError, OverflowError, TypeError):
+            continue
+
+    return None
+
+
+def get_latest_entry_time(entries: Iterable) -> Optional[int]:
+    """Return the newest parsed entry timestamp from a feed payload."""
+    latest_entry_time = None
+
+    for entry in entries:
+        entry_time = extract_entry_time(entry)
+        if entry_time is None:
+            continue
+
+        if latest_entry_time is None or entry_time > latest_entry_time:
+            latest_entry_time = entry_time
+
+    return latest_entry_time
+
+
+def init_feed_check_time(store, url: str) -> None:
+    """Set last_check_time for a feed to now, preventing history from being pushed."""
+    store.feeds.update(url, last_check_time=time.time())
+
+
+def _extract_entry_content(entry) -> str:
+    content_items = entry.get("content") or []
+    if isinstance(content_items, list):
+        for item in content_items:
+            if isinstance(item, dict) and item.get("value"):
+                return item["value"]
+
+    return entry.get("summary") or entry.get("description") or ""
+
+
+def build_entry_key(entry) -> str:
+    """Build a stable key for a feed entry across fetches."""
+    for field in ("id", "guid", "link"):
+        value = normalize_multiline_text(entry.get(field) or "", joiner="").strip()
+        if value:
+            return f"{field}:{value}"
+
+    title = normalize_entry_title(entry)
+    published_text = normalize_multiline_text(entry.get("published") or entry.get("updated") or "", joiner=" ").strip()
+    content = normalize_multiline_text(_extract_entry_content(entry), joiner=" ").strip()
+
+    fingerprint = "\x1f".join((title[:512], published_text[:256], content[:2048]))
+    digest = hashlib.sha256(fingerprint.encode("utf-8", "ignore")).hexdigest()
+    return f"hash:{digest}"
 
 
 def get_whitelist():
@@ -167,21 +244,6 @@ class AdminFilter(filters.MessageFilter):
 
 # Create filter instance
 admin_filter = AdminFilter()
-
-
-def init_feed_check_time(store, feed_url: str):
-    """
-    Initialize the last check time for a newly added feed to current time.
-    This prevents pushing historical content.
-
-    Args:
-        store: DataStore instance
-        feed_url: URL of the feed
-    """
-    import time
-    current_time = time.time()
-    store.feeds.update(feed_url, last_check_time=current_time)
-    logger.info(f"Initialized check time for {feed_url}")
 
 
 class Messages:

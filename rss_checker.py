@@ -9,6 +9,7 @@ import feedparser
 import httpx
 
 from data_store import store
+from github_enricher import get_changelog_link, is_github_release_feed
 from utils import build_feed_request_headers, fetch_feed_with_retry
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,13 @@ def _remove_blank_lines(text: str, joiner: str = " ") -> str:
     return joiner.join(parts)
 
 
-def _build_feed_messages(feed_title: str, entries) -> list[str]:
-    """Build one or more Telegram-safe HTML messages for a feed update."""
+def _build_feed_messages(feed_title: str, entries_with_changelog: list) -> list[str]:
+    """Build one or more Telegram-safe HTML messages for a feed update.
+
+    Args:
+        feed_title: Display title of the feed.
+        entries_with_changelog: List of (entry_dict, changelog_line_or_None) tuples.
+    """
     normalized_feed_title = _remove_blank_lines(feed_title or "Untitled Feed", joiner=" ").strip() or "Untitled Feed"
     safe_feed_title = escape(_truncate_text(normalized_feed_title, 256), quote=False)
     header = f"<b>{safe_feed_title}</b>"
@@ -43,7 +49,7 @@ def _build_feed_messages(feed_title: str, entries) -> list[str]:
     messages = []
     current_message = f"{header}\n"
 
-    for entry in entries:
+    for entry, changelog_line in entries_with_changelog:
         raw_title = _remove_blank_lines(entry.get("title") or "No Title", joiner=" ").strip() or "No Title"
         safe_title = escape(_truncate_text(raw_title, MAX_ENTRY_TITLE_LENGTH), quote=False)
 
@@ -56,6 +62,9 @@ def _build_feed_messages(feed_title: str, entries) -> list[str]:
             entry_line = f"• <b>{safe_title}</b>"
 
         block = f"{entry_line}\n"
+        if changelog_line:
+            block += f"{changelog_line}\n"
+
         if len(current_message) + len(block) > MAX_TELEGRAM_MESSAGE_LENGTH:
             messages.append(current_message.rstrip())
             current_message = f"{header}\n{block}"
@@ -162,6 +171,15 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
             # Get feed title
             feed_title = latest_title or feed_data.title or feed_url
 
+            # For GitHub release feeds, resolve changelog links once (shared across subscribers)
+            github_feed = is_github_release_feed(feed_url)
+            changelog_map: dict[str, str | None] = {}
+            if github_feed:
+                for entry in entries_to_push:
+                    key = (entry.get("link") or entry.get("id") or "").strip()
+                    if key and key not in changelog_map:
+                        changelog_map[key] = await get_changelog_link(http_client, feed_url, entry)
+
             # Process each subscriber separately for deduplication
             total_filtered = 0
             for chat_id in subscribers:
@@ -181,7 +199,11 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
                         logger.debug(f"Skipping duplicate message '{title}' for chat {chat_id}")
 
                 if filtered_entries:
-                    for combined_message in _build_feed_messages(feed_title, filtered_entries):
+                    entries_with_changelog = [
+                        (entry, changelog_map.get((entry.get("link") or entry.get("id") or "").strip()) if github_feed else None)
+                        for entry in filtered_entries
+                    ]
+                    for combined_message in _build_feed_messages(feed_title, entries_with_changelog):
                         messages_to_send.append((chat_id, combined_message))
 
             if total_filtered > 0:
