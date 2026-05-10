@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler
 
 from data_store import store
-from handlers import start, add_feed, list_feeds, remove_feed, export_opml, import_opml
+from handlers import start, add_feed, list_feeds, no_as_a_service, remove_feed, export_opml, import_opml
 from rss_checker import check_updates
 from utils import FEED_REQUEST_TIMEOUT, admin_filter
 
@@ -63,6 +63,10 @@ def main():
             timeout=FEED_REQUEST_TIMEOUT,
             follow_redirects=True
         )
+        application.bot_data['no_http_client'] = httpx.AsyncClient(
+            timeout=5.0,
+            follow_redirects=True
+        )
         logger.info("RSS HTTP client initialized")
     
     async def post_shutdown(application):
@@ -71,6 +75,10 @@ def main():
         if rss_http_client:
             await rss_http_client.aclose()
             logger.info("RSS HTTP client closed")
+        no_http_client = application.bot_data.get('no_http_client')
+        if no_http_client:
+            await no_http_client.aclose()
+            logger.info("No-as-a-service HTTP client closed")
     
     app = (
         ApplicationBuilder()
@@ -88,6 +96,7 @@ def main():
     app.add_handler(CommandHandler("remove", remove_feed, filters=admin_filter))
     app.add_handler(CommandHandler("export", export_opml, filters=admin_filter))
     app.add_handler(CommandHandler("import", import_opml, filters=admin_filter))
+    app.add_handler(CommandHandler("no", no_as_a_service))
 
     # Job Queue - Check feeds every 5 minutes
     if app.job_queue:

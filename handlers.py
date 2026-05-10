@@ -20,6 +20,8 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
+NO_AS_A_SERVICE_URL = "https://naas.isalman.dev/no"
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start and /help commands."""
@@ -145,6 +147,42 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error listing feeds: {e}")
         await update.message.reply_text(Messages.ERROR_OCCURRED)
+
+
+async def no_as_a_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /no when replying to another user's message."""
+    message = update.message
+    if not message or not message.reply_to_message:
+        return
+
+    target_message = message.reply_to_message
+    if message.from_user and target_message.from_user and message.from_user.id == target_message.from_user.id:
+        return
+
+    http_client = context.application.bot_data.get('no_http_client')
+    owns_http_client = False
+    if not http_client:
+        http_client = httpx.AsyncClient(timeout=5.0, follow_redirects=True)
+        owns_http_client = True
+
+    try:
+        response = await http_client.get(NO_AS_A_SERVICE_URL)
+        response.raise_for_status()
+        payload = response.json()
+        reason = str(payload.get("reason") or "").strip()
+
+        if not reason:
+            logger.warning("No-as-a-service response did not include a reason")
+            return
+
+        await target_message.reply_text(reason)
+    except (ValueError, httpx.HTTPError) as e:
+        logger.error(f"Error fetching no-as-a-service response: {e}")
+    except Exception as e:
+        logger.error(f"Error in no_as_a_service: {e}")
+    finally:
+        if owns_http_client:
+            await http_client.aclose()
 
 
 async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
