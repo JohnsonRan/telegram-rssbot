@@ -8,6 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from data_store import store
 from handlers import start, add_feed, list_feeds, no_as_a_service, remove_feed, export_opml, import_opml
 from rss_checker import check_updates
+from sticker_converter import sticker
 from utils import FEED_REQUEST_TIMEOUT, admin_filter
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ def main():
     app.add_handler(CommandHandler("export", export_opml, filters=admin_filter))
     app.add_handler(CommandHandler("import", import_opml, filters=admin_filter))
     app.add_handler(CommandHandler("no", no_as_a_service))
+    app.add_handler(CommandHandler("sticker", sticker))
 
     # Job Queue - Check feeds every 5 minutes
     if app.job_queue:

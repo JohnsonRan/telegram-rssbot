@@ -3,3 +3,5 @@ feedparser
 python-dotenv
 listparser
 httpx
+Pillow
+rlottie-python
