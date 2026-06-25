@@ -2,6 +2,7 @@ import asyncio
 import logging
 from html import escape
 from io import BytesIO
+from xml.sax.saxutils import escape as xml_escape
 
 import feedparser
 import httpx
@@ -96,14 +97,17 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(Messages.ALREADY_SUBSCRIBED)
             return
 
-        # Add feed to database
+        # Add feed to database (track whether it already existed for other chats)
+        feed_existed = store.feeds.get(url) is not None
         store.feeds.create(Feed(url=url, title=feed_title))
 
         # Subscribe chat to feed
         store.subscriptions.subscribe(chat_id, url)
 
-        # Initialize check time to avoid pushing history
-        init_feed_check_time(store, url)
+        # Only seed the check time for a brand-new feed. Resetting it for an
+        # already-tracked feed would drop entries pending for existing subscribers.
+        if not feed_existed:
+            init_feed_check_time(store, url)
 
         safe_feed_title = escape(feed_title)
         await msg.edit_text(
@@ -111,6 +115,10 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
 
+    except ValueError as e:
+        # Raised by the SSRF guard (bad scheme / non-public host) or too many redirects
+        logger.warning(f"Rejected feed URL {url}: {e}")
+        await msg.edit_text(f"{Messages.INVALID_FEED}\n{str(e)[:100]}")
     except httpx.TimeoutException:
         logger.warning(f"Timeout validating feed {url}")
         await msg.edit_text(f"{Messages.INVALID_FEED} (请求超时)")
@@ -229,8 +237,9 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         opml_content = '<?xml version="1.0" encoding="UTF-8"?>\n<opml version="1.0">\n<head><title>RSS Export</title></head>\n<body>\n'
 
         for feed in feeds:
-            title = feed.title.replace('&', '&amp;').replace('"', '&quot;')
-            url = feed.url.replace('&', '&amp;').replace('"', '&quot;')
+            # Escape &, <, > and " so titles/URLs can't break the OPML attributes
+            title = xml_escape(feed.title or feed.url, {'"': '&quot;'})
+            url = xml_escape(feed.url, {'"': '&quot;'})
             opml_content += f'  <outline text="{title}" title="{title}" type="rss" xmlUrl="{url}"/>\n'
 
         opml_content += '</body>\n</opml>'
@@ -279,7 +288,7 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status_msg = await update.message.reply_text(Messages.IMPORTING.format(len(parsed.feeds)))
 
-        newly_subscribed = []
+        newly_created = []
         subscribed_count = 0
 
         # Import feeds
@@ -288,16 +297,18 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not url:
                 continue
 
-            # Add feed
+            # Add feed (remember whether it already existed for other chats)
+            feed_existed = store.feeds.get(url) is not None
             store.feeds.create(Feed(url=url, title=item.title or url))
 
             # Subscribe if not already
             if store.subscriptions.subscribe(chat_id, url):
                 subscribed_count += 1
-                newly_subscribed.append(url)
+                if not feed_existed:
+                    newly_created.append(url)
 
-        # Initialize check time for newly subscribed feeds
-        for url in newly_subscribed:
+        # Only seed check time for brand-new feeds (don't disturb existing subscribers)
+        for url in newly_created:
             try:
                 init_feed_check_time(store, url)
             except Exception as e:

@@ -1,5 +1,4 @@
 import asyncio
-import calendar
 import logging
 import random
 import time
@@ -10,7 +9,7 @@ import httpx
 
 from data_store import store
 from github_enricher import get_changelog_link, is_github_release_feed
-from utils import build_feed_request_headers, fetch_feed_with_retry
+from utils import build_entry_key, build_feed_request_headers, fetch_feed_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +94,10 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
 
         try:
             response = await fetch_feed_with_retry(http_client, feed_url, headers=headers)
+        except ValueError as e:
+            # SSRF guard rejected the URL/redirect target, or too many redirects
+            logger.warning(f"Skipping unsafe/invalid feed URL {feed_url}: {e}")
+            return messages_to_send
         except httpx.TimeoutException:
             logger.warning(f"Timeout fetching {feed_url}")
             return messages_to_send
@@ -122,38 +125,22 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
 
         store.feeds.update(feed_url, last_etag=etag, last_modified=modified, title=latest_title)
 
-        # Get last check time
-        last_check_time = feed_data.last_check_time
+        # Determine new entries via persistent entry-key tracking.
+        # Unlike publish-time comparison, this also handles feeds whose entries
+        # lack published/updated timestamps (previously dropped silently).
+        entry_key_pairs = [(entry, build_entry_key(entry)) for entry in d.entries]
+        all_keys = [key for _, key in entry_key_pairs]
 
-        # Check for new entries based on publish time
-        new_entries = []
+        # First check (new feed) or migration of an existing feed with no recorded
+        # keys yet: seed the keys and push nothing, so history is never spammed.
+        is_first_check = feed_data.last_check_time is None or store.feed_entries.count(feed_url) == 0
+        if is_first_check:
+            store.feed_entries.seed(feed_url, all_keys)
+            store.feeds.update(feed_url, last_check_time=current_time)
+            return messages_to_send
 
-        for entry in d.entries:
-            # Get entry publish time
-            entry_time = None
-
-            # Try different time fields
-            for time_field in ['published_parsed', 'updated_parsed', 'created_parsed']:
-                if hasattr(entry, time_field) and getattr(entry, time_field):
-                    time_struct = getattr(entry, time_field)
-                    try:
-                        # Use calendar.timegm for UTC time (feedparser returns UTC)
-                        entry_time = calendar.timegm(time_struct)
-                        break
-                    except (ValueError, OverflowError):
-                        continue
-
-            if last_check_time is None:
-                # First check - skip all existing entries (don't push history)
-                continue
-
-            # If entry has no publish time, skip it (can't determine if it's new)
-            if entry_time is None:
-                continue
-
-            # Check if entry is newer than last check
-            if entry_time > last_check_time:
-                new_entries.append(entry)
+        new_keys = store.feed_entries.register_and_get_new(feed_url, all_keys)
+        new_entries = [entry for entry, key in entry_key_pairs if key in new_keys]
 
         # Update last check time
         store.feeds.update(feed_url, last_check_time=current_time)
@@ -283,6 +270,12 @@ async def check_updates(context):
         store.messages.cleanup_old()
     except Exception as e:
         logger.error(f"Error cleaning up old messages: {e}")
+
+    # Prune entry keys that have long since left their feeds
+    try:
+        store.feed_entries.cleanup_old()
+    except Exception as e:
+        logger.error(f"Error cleaning up old feed entry keys: {e}")
 
     # Get RSS HTTP client from bot_data
     http_client = context.bot_data.get('rss_http_client')

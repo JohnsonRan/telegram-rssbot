@@ -371,6 +371,79 @@ class MessageHistoryOperations(_BaseOperations):
 
 
 # ============================================================================
+# Feed 条目追踪操作类（用于判定新条目，支持无时间戳的 Feed）
+# ============================================================================
+
+class FeedEntryOperations(_BaseOperations):
+    """持久化记录每个 Feed 已见过的条目 key，用于可靠地判定新条目。
+
+    与基于发布时间的判定不同，这里以 build_entry_key 生成的稳定指纹为准，
+    因此即使条目缺少 published/updated 时间也能正确去重并推送。
+    """
+
+    # 条目 key 保留期（秒）。按 last_seen 修剪：仅清理早已离开 Feed 的条目。
+    RETENTION = 7_776_000  # 90 天
+
+    def count(self, feed_url: str) -> int:
+        """返回该 Feed 已记录的条目 key 数量。"""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM feed_entries WHERE feed_url = ?",
+            (feed_url,)
+        ).fetchone()
+        return row["c"] if row else 0
+
+    def register_and_get_new(self, feed_url: str, keys: List[str]) -> Set[str]:
+        """记录本次见到的所有 key（刷新 last_seen），返回其中此前未见过的 key 集合。"""
+        if not keys:
+            return set()
+
+        unique_keys = list(dict.fromkeys(keys))
+        placeholders = ", ".join("?" for _ in unique_keys)
+        conn = self._get_conn()
+        existing = {
+            row["entry_key"]
+            for row in conn.execute(
+                f"SELECT entry_key FROM feed_entries "
+                f"WHERE feed_url = ? AND entry_key IN ({placeholders})",
+                [feed_url, *unique_keys],
+            )
+        }
+
+        now = time.time()
+        with self._transaction() as conn:
+            conn.executemany("""
+                INSERT INTO feed_entries (feed_url, entry_key, first_seen, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(feed_url, entry_key)
+                DO UPDATE SET last_seen = excluded.last_seen
+            """, [(feed_url, key, now, now) for key in unique_keys])
+
+        return {key for key in unique_keys if key not in existing}
+
+    def seed(self, feed_url: str, keys: List[str]) -> None:
+        """记录 key 但不返回新条目（用于首次检查或迁移既有 Feed，避免推送历史）。"""
+        self.register_and_get_new(feed_url, keys)
+
+    def cleanup_old(self, window_seconds: Optional[int] = None) -> int:
+        """清理长期未再出现的条目 key，返回删除的记录数。"""
+        window = window_seconds or self.RETENTION
+        cutoff_time = time.time() - window
+
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM feed_entries WHERE last_seen < ?",
+                (cutoff_time,)
+            )
+            deleted_count = cursor.rowcount
+
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} stale feed entry keys")
+
+            return deleted_count
+
+
+# ============================================================================
 # 主存储类
 # ============================================================================
 
@@ -395,6 +468,7 @@ class SQLiteStore:
         self.feeds = FeedOperations(self)
         self.subscriptions = SubscriptionOperations(self)
         self.messages = MessageHistoryOperations(self)
+        self.feed_entries = FeedEntryOperations(self)
     
     def _get_conn(self) -> sqlite3.Connection:
         """获取线程本地数据库连接"""
@@ -480,10 +554,27 @@ class SQLiteStore:
         """)
         
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_message_history_lookup 
+            CREATE INDEX IF NOT EXISTS idx_message_history_lookup
             ON message_history(title, feed_url, chat_id)
         """)
-        
+
+        # Feed 条目追踪表（用于判定新条目）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS feed_entries (
+                feed_url TEXT NOT NULL,
+                entry_key TEXT NOT NULL,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                PRIMARY KEY (feed_url, entry_key),
+                FOREIGN KEY (feed_url) REFERENCES feeds(url) ON DELETE CASCADE
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_feed_entries_last_seen
+            ON feed_entries(last_seen)
+        """)
+
         conn.commit()
         logger.info(f"Database initialized: {self.db_file}")
     

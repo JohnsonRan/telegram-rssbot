@@ -1,15 +1,17 @@
 import asyncio
 import calendar
 import hashlib
+import ipaddress
 import logging
 import os
+import socket
 import time
-from functools import wraps
-from typing import Iterable, Optional
+from typing import Optional
+from urllib.parse import urljoin, urlparse
 
 import httpx
-from telegram import ChatMember, Update
-from telegram.ext import ContextTypes, filters
+from telegram import ChatMember
+from telegram.ext import filters
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,48 @@ FEED_FETCH_RETRIES = 2
 FEED_RETRY_BACKOFF_SECONDS = 0.6
 FEED_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 ENTRY_TIME_FIELDS = ("published_parsed", "updated_parsed", "created_parsed")
+
+# SSRF guard / redirect handling
+ALLOWED_URL_SCHEMES = {"http", "https"}
+REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+MAX_FEED_REDIRECTS = 5
+
+
+async def assert_public_url(url: str) -> None:
+    """SSRF guard: reject non-HTTP(S) URLs and hosts resolving to non-public IPs.
+
+    Raises ValueError when the URL scheme is unsupported, the host cannot be
+    resolved, or any resolved address is private/loopback/link-local/reserved/
+    multicast/unspecified.
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
+
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL has no host")
+
+    port = parsed.port or (443 if scheme == "https" else 80)
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM
+        )
+    except socket.gaierror as exc:
+        raise ValueError(f"cannot resolve host {host}: {exc}") from exc
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"blocked non-public address {ip} for host {host}")
 
 
 def build_feed_request_headers(last_etag: Optional[str] = None, last_modified: Optional[str] = None) -> dict:
@@ -32,15 +76,17 @@ def build_feed_request_headers(last_etag: Optional[str] = None, last_modified: O
     return headers
 
 
-async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, headers: Optional[dict] = None) -> httpx.Response:
-    """Fetch feed with a small retry budget for transient network/server failures."""
+async def _request_with_retry(http_client: httpx.AsyncClient, url: str, headers: Optional[dict] = None) -> httpx.Response:
+    """Fetch a single target (no redirect following) with a small retry budget."""
     last_error = None
     total_attempts = FEED_FETCH_RETRIES + 1
 
     for attempt in range(total_attempts):
         attempt_no = attempt + 1
         try:
-            response = await http_client.get(url, headers=headers, timeout=FEED_REQUEST_TIMEOUT)
+            response = await http_client.get(
+                url, headers=headers, timeout=FEED_REQUEST_TIMEOUT, follow_redirects=False
+            )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_error = exc
             if attempt >= FEED_FETCH_RETRIES:
@@ -94,6 +140,30 @@ async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, header
     raise RuntimeError(f"Failed to fetch feed: {url}")
 
 
+async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, headers: Optional[dict] = None) -> httpx.Response:
+    """Fetch a feed, validating every hop against the SSRF guard.
+
+    Redirects are followed manually so that each target is re-checked with
+    assert_public_url (a public URL could otherwise redirect to an internal one).
+    """
+    current_url = url
+
+    for _ in range(MAX_FEED_REDIRECTS + 1):
+        await assert_public_url(current_url)
+        response = await _request_with_retry(http_client, current_url, headers)
+
+        if response.status_code in REDIRECT_STATUS_CODES:
+            location = response.headers.get("location")
+            if not location:
+                return response
+            current_url = urljoin(current_url, location)
+            continue
+
+        return response
+
+    raise ValueError(f"too many redirects while fetching {url}")
+
+
 def normalize_multiline_text(text: str, joiner: str = " ") -> str:
     """Collapse multi-line text into a single normalized string."""
     parts = [line.strip() for line in (text or "").splitlines() if line.strip()]
@@ -119,21 +189,6 @@ def extract_entry_time(entry) -> Optional[int]:
             continue
 
     return None
-
-
-def get_latest_entry_time(entries: Iterable) -> Optional[int]:
-    """Return the newest parsed entry timestamp from a feed payload."""
-    latest_entry_time = None
-
-    for entry in entries:
-        entry_time = extract_entry_time(entry)
-        if entry_time is None:
-            continue
-
-        if latest_entry_time is None or entry_time > latest_entry_time:
-            latest_entry_time = entry_time
-
-    return latest_entry_time
 
 
 def init_feed_check_time(store, url: str) -> None:
@@ -173,41 +228,6 @@ def get_whitelist():
     if not wl:
         return []
     return [int(x.strip()) for x in wl.split(",") if x.strip().isdigit()]
-
-
-def require_permission(func):
-    """Decorator to check permissions before executing handler."""
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user = update.effective_user
-        chat = update.effective_chat
-
-        if not user:
-            return
-
-        # Private Chat: Whitelist check
-        if chat.type == 'private':
-            whitelist = get_whitelist()
-            if user.id not in whitelist:
-                await update.message.reply_text(Messages.UNAUTHORIZED)
-                logger.warning(f"Unauthorized access by {user.id} ({user.username}) in private chat.")
-                return
-
-        # Group/Channel: Admin check
-        elif chat.type in ['group', 'supergroup', 'channel']:
-            try:
-                member = await chat.get_member(user.id)
-                if member.status not in [ChatMember.OWNER, ChatMember.ADMINISTRATOR]:
-                    await update.message.reply_text(Messages.ADMIN_ONLY)
-                    return
-            except Exception as e:
-                logger.error(f"Error checking permissions: {e}")
-                return
-
-        # Execute the handler
-        return await func(update, context, *args, **kwargs)
-
-    return wrapper
 
 
 class AdminFilter(filters.MessageFilter):
