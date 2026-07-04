@@ -37,6 +37,9 @@ class StickerConverterSettings:
     max_bytes: int = 1_000_000
     background: str = "white"
 
+    def __post_init__(self):
+        self.background_rgba  # validate eagerly so bad settings fail at construction
+
     @classmethod
     def from_env(cls):
         return cls(
@@ -251,29 +254,56 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _size_ladder(settings: StickerConverterSettings) -> list[int]:
+    sizes = [settings.max_size] + [min(settings.max_size, n) for n in (220, 200, 180, 160, 128, 128, 128)]
+    return [max(16, size) for size in sizes]
+
+
 def _profiles(
     settings: StickerConverterSettings,
     source_info: FrameSourceInfo | None = None,
 ) -> list[tuple[int, int]]:
     base_fps = _adaptive_base_fps(settings, source_info)
-    candidates = [
-        (settings.max_size, base_fps),
-        (min(settings.max_size, 220), min(base_fps, max(20, round(base_fps * 0.75)))),
-        (min(settings.max_size, 200), min(base_fps, max(15, round(base_fps * 0.625)))),
-        (min(settings.max_size, 180), min(base_fps, max(12, round(base_fps * 0.5)))),
-        (min(settings.max_size, 160), min(base_fps, 10)),
-        (min(settings.max_size, 128), min(base_fps, 8)),
-        (min(settings.max_size, 128), min(base_fps, 6)),
-        (min(settings.max_size, 128), min(base_fps, 4)),
-    ]
+    fps_ladder = _fps_ladder(base_fps, source_info.fps if source_info else None)
+    sizes = _size_ladder(settings)
+    # Pad the fps ladder with its last rung so every size gets a partner.
+    fps_ladder = (fps_ladder + [fps_ladder[-1]] * len(sizes))[: len(sizes)]
     seen = set()
     profiles = []
-    for size, fps in candidates:
-        profile = (max(16, size), max(1, fps))
+    for size, fps in zip(sizes, fps_ladder):
+        profile = (size, max(1, fps))
         if profile not in seen:
             profiles.append(profile)
             seen.add(profile)
     return profiles
+
+
+def _fps_ladder(base_fps: int, source_fps: float | None) -> list[int]:
+    """Build the descending fps steps for the retry ladder.
+
+    When the source frame rate is known, prefer fps values that divide it
+    evenly (source/2, source/3, ...) so every kept frame is sampled at a
+    constant interval and the GIF plays without judder. Falls back to fixed
+    ratios when the source rate is unknown or has too few divisors to form a
+    ladder (e.g. prime frame rates). Length may differ from the size ladder;
+    _profiles aligns them.
+    """
+    src = round(source_fps) if source_fps and source_fps > 0 else 0
+    if src >= 1:
+        ladder = [src // n for n in range(1, src + 1) if src % n == 0 and src // n <= base_fps]
+        if len(ladder) >= 4:
+            return ladder
+
+    return [
+        base_fps,
+        min(base_fps, max(20, round(base_fps * 0.75))),
+        min(base_fps, max(15, round(base_fps * 0.625))),
+        min(base_fps, max(12, round(base_fps * 0.5))),
+        min(base_fps, 10),
+        min(base_fps, 8),
+        min(base_fps, 6),
+        min(base_fps, 4),
+    ]
 
 
 def _adaptive_base_fps(
@@ -292,24 +322,29 @@ def _adaptive_base_fps(
 
 
 def _convert_static_image(input_path: Path, output_path: Path, settings: StickerConverterSettings) -> None:
+    try:
+        # First frame only; animated inputs routed here would waste memory decoding fully.
+        with Image.open(input_path) as image:
+            first_frame = image.convert("RGBA")
+    except Exception as exc:
+        raise ConversionError("静态图片或贴纸转换失败。") from exc
+
     last_error = None
-    for size, _fps in _profiles(settings):
+    for size in dict.fromkeys(_size_ladder(settings)):
         try:
-            frames, _durations = _load_image_frames(input_path)
-            _save_png_frame(_fit_frame(frames[0], size, settings), output_path)
+            _save_png_frame(_fit_frame(first_frame, size, settings), output_path)
             if _within_limit(output_path, settings):
                 return
         except Exception as exc:
             last_error = exc
             break
 
-    if output_path.exists():
+    if _accept_oversized(output_path, settings):
         return
     raise ConversionError("静态图片或贴纸转换失败。") from last_error
 
 
 def _save_png_frame(frame: Image.Image, output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     frame.save(output_path, format="PNG", optimize=True)
 
 
@@ -318,19 +353,14 @@ def _convert_video(input_path: Path, output_path: Path, settings: StickerConvert
         raise ConversionError("未找到 ffmpeg。请先安装 ffmpeg。")
 
     source_info = _probe_video_source_info(input_path)
-    last_error = None
-    for size, fps in _profiles(settings, source_info):
-        try:
-            _ffmpeg_webm_to_gif(input_path, output_path, size, fps, settings)
-            if _within_limit(output_path, settings):
-                return
-        except (subprocess.CalledProcessError, ConversionError) as exc:
-            last_error = exc
-            logger.warning("ffmpeg conversion failed: %s", getattr(exc, "stderr", exc))
+    top_size, top_fps = _profiles(settings, source_info)[0]
+    try:
+        frames, durations = _extract_video_frames(input_path, top_size, top_fps)
+    except subprocess.CalledProcessError as exc:
+        logger.warning("ffmpeg conversion failed: %s", exc.stderr)
+        raise ConversionError("视频贴纸转换失败。") from exc
 
-    if output_path.exists():
-        return
-    raise ConversionError("视频贴纸转换失败。") from last_error
+    _encode_gif_profiles(frames, durations, output_path, settings, "视频贴纸转换失败。")
 
 
 def _probe_video_source_info(input_path: Path) -> FrameSourceInfo:
@@ -398,13 +428,8 @@ def _parse_duration_ms(value) -> int | None:
     return max(20, round(seconds * 1000))
 
 
-def _ffmpeg_webm_to_gif(
-    input_path: Path,
-    output_path: Path,
-    size: int,
-    fps: int,
-    settings: StickerConverterSettings,
-) -> None:
+def _extract_video_frames(input_path: Path, size: int, fps: int) -> tuple[list[Image.Image], list[int]]:
+    """Decode the video once at the top profile; retries resample these frames in memory."""
     with TemporaryDirectory(prefix="rssbot_webm_") as tmp:
         frame_dir = Path(tmp)
         frame_pattern = frame_dir / "frame_%05d.png"
@@ -418,7 +443,9 @@ def _ffmpeg_webm_to_gif(
                 "-i",
                 str(input_path),
                 "-vf",
-                f"fps={fps}",
+                # Scale inside ffmpeg so extracted frames are already small;
+                # later profiles downscale these in memory instead of re-decoding.
+                f"fps={fps},scale={size}:{size}:force_original_aspect_ratio=decrease:flags=lanczos",
                 str(frame_pattern),
             ],
             check=True,
@@ -433,10 +460,10 @@ def _ffmpeg_webm_to_gif(
         frames = []
         for frame_path in frame_paths:
             with Image.open(frame_path) as image:
-                frames.append(_fit_frame(image, size, settings))
+                frames.append(image.convert("RGBA"))
 
         duration = max(20, round(1000 / fps))
-        _save_gif_frames(frames, [duration] * len(frames), output_path, settings)
+        return frames, [duration] * len(frames)
 
 
 def _convert_tgs(input_path: Path, output_path: Path, settings: StickerConverterSettings) -> None:
@@ -451,11 +478,10 @@ def _convert_tgs(input_path: Path, output_path: Path, settings: StickerConverter
     with TemporaryDirectory(prefix="rssbot_tgs_") as tmp:
         raw_gif = Path(tmp) / "raw.gif"
 
-        if not raw_gif.exists():
-            try:
-                _convert_tgs_with_lottie_cli(input_path, raw_gif)
-            except Exception as exc:
-                errors.append(f"lottie_convert.py: {exc}")
+        try:
+            _convert_tgs_with_lottie_cli(input_path, raw_gif)
+        except Exception as exc:
+            errors.append(f"lottie_convert.py: {exc}")
 
         if not raw_gif.exists():
             detail = "；".join(errors) if errors else "没有可用的 TGS 转换器"
@@ -507,7 +533,7 @@ def _convert_tgs_with_rlottie(
     except Exception as exc:
         last_error = exc
 
-    if output_path.exists():
+    if _accept_oversized(output_path, settings):
         return
     raise ConversionError("TGS 动态贴纸渲染失败。") from last_error
 
@@ -527,6 +553,17 @@ def _convert_tgs_with_lottie_cli(input_path: Path, output_path: Path) -> None:
 
 def _compress_gif(input_path: Path, output_path: Path, settings: StickerConverterSettings) -> None:
     frames, durations = _load_image_frames(input_path)
+    _encode_gif_profiles(frames, durations, output_path, settings, "GIF 压缩失败。")
+
+
+def _encode_gif_profiles(
+    frames: list[Image.Image],
+    durations: list[int],
+    output_path: Path,
+    settings: StickerConverterSettings,
+    failure_message: str,
+) -> None:
+    """Re-encode in-memory frames through the retry ladder until the GIF fits max_bytes."""
     source_info = _image_source_info(frames, durations)
     last_error = None
     for size, fps in _profiles(settings, source_info):
@@ -539,9 +576,9 @@ def _compress_gif(input_path: Path, output_path: Path, settings: StickerConverte
         except Exception as exc:
             last_error = exc
 
-    if output_path.exists():
+    if _accept_oversized(output_path, settings):
         return
-    raise ConversionError("GIF 压缩失败。") from last_error
+    raise ConversionError(failure_message) from last_error
 
 
 def _image_source_info(frames: list[Image.Image], durations: list[int]) -> FrameSourceInfo:
@@ -657,7 +694,6 @@ def _save_gif_frames(
 ) -> None:
     if not frames:
         raise ConversionError("没有可保存的 GIF 帧。")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     gif_frames, has_transparency = _prepare_gif_frames(frames, settings)
     first, *rest = gif_frames
@@ -711,17 +747,27 @@ def _to_paletted_gif_frame(frame: Image.Image, reserve_transparency: bool) -> Im
     if len(palette) < 768:
         palette.extend([0] * (768 - len(palette)))
 
-    output = Image.new("P", quantized.size)
+    # Shift palette indices by one so index 0 is the reserved transparent slot,
+    # then stamp 0 into the transparent regions. C-level ops instead of a
+    # per-pixel Python loop.
+    output = quantized.point(lambda index: min(255, index + 1))
     output.putpalette(palette)
-    output.putdata(
-        [
-            0 if mask else min(255, index + 1)
-            for index, mask in zip(quantized.getdata(), transparent_mask.getdata(), strict=True)
-        ]
-    )
+    output.paste(0, mask=transparent_mask)
     output.info["transparency"] = 0
     return output
 
 
 def _within_limit(path: Path, settings: StickerConverterSettings) -> bool:
     return path.exists() and path.stat().st_size <= settings.max_bytes
+
+
+def _accept_oversized(path: Path, settings: StickerConverterSettings) -> bool:
+    """Best-effort fallback: keep the last output even over max_bytes, but log it."""
+    if not path.exists():
+        return False
+    if not _within_limit(path, settings):
+        logger.warning(
+            "Sticker output %s is %d bytes, over the %d byte limit; sending anyway",
+            path.name, path.stat().st_size, settings.max_bytes,
+        )
+    return True
