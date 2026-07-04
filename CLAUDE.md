@@ -43,11 +43,11 @@ Single SQLite-backed process. Module map:
 - **data_store.py** — SQLite layer. A single module-global `store = SQLiteStore()` is imported
   everywhere. Connections are **thread-local** (`threading.local`) with WAL mode, which matters
   because `feedparser.parse` runs via `asyncio.to_thread`. Domain-grouped operation classes:
-  `store.chats`, `store.feeds`, `store.subscriptions`, `store.messages`. Schema is created on
-  first connection in `_init_database`.
+  `store.chats`, `store.feeds`, `store.subscriptions`, `store.messages`, `store.feed_entries`.
+  Schema is created on first connection in `_init_database`.
 - **utils.py** — shared feed-fetch helpers (`build_feed_request_headers`,
-  `fetch_feed_with_retry` with backoff on retryable statuses), entry time/key extraction, the
-  `Messages` text constants, and the **permission layer**.
+  `fetch_feed_with_retry` with backoff on retryable statuses and the SSRF guard), entry-key
+  extraction (`build_entry_key`), the `Messages` text constants, and the **permission layer**.
 - **github_enricher.py** — for `*/releases.atom` feeds, appends a "Full Changelog" compare
   link, parsed from entry HTML first, falling back to the GitHub Releases API.
 - **sticker_converter.py** — `/sticker`: static→PNG (Pillow), animated `.tgs`→GIF
@@ -58,11 +58,15 @@ Single SQLite-backed process. Module map:
 - **Permissions:** `/start /help /add /list /remove /export /import` are gated by `admin_filter`
   (registered in bot.py). The filter requires whitelist membership in private chats and
   owner/admin status in groups/channels. `/no` and `/sticker` are intentionally **public** (no
-  filter). `utils.require_permission` is an equivalent decorator kept available but the
-  registration uses the filter.
-- **No history spam:** when a feed is first added, `init_feed_check_time` stamps
-  `last_check_time = now`. The poller only pushes entries with `entry_time > last_check_time`,
-  so existing entries are never sent on subscription.
+  filter).
+- **No history spam:** new entries are detected via persistent per-feed entry keys
+  (`feed_entries` table, `build_entry_key`). On a feed's first poll,
+  `feed_entries.register_and_get_new` seeds all current keys and reports nothing new, so
+  existing entries are never sent on subscription. `last_check_time` is diagnostic metadata
+  only.
+- **SSRF guard:** all feed fetches go through `fetch_feed_with_retry`, which validates every
+  URL (and every redirect hop) with `assert_public_url`; rejections raise
+  `UnsafeFeedURLError`.
 - **Dedup:** `message_history` table deduplicates by `(title, feed_url, chat_id)` within a
   1.5h window (`DEDUP_WINDOW = 5400`); old rows are cleaned at the top of each `check_updates`.
 - **Feed GC:** unsubscribing the last subscriber of a feed deletes the feed row

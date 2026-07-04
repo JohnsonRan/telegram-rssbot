@@ -9,7 +9,14 @@ import httpx
 
 from data_store import store
 from github_enricher import get_changelog_link, is_github_release_feed
-from utils import build_entry_key, build_feed_request_headers, fetch_feed_with_retry
+from utils import (
+    UnsafeFeedURLError,
+    build_entry_key,
+    build_feed_request_headers,
+    fetch_feed_with_retry,
+    normalize_entry_title,
+    normalize_multiline_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +36,8 @@ def _truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 3] + "..."
 
 
-def _remove_blank_lines(text: str, joiner: str = " ") -> str:
-    parts = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    return joiner.join(parts)
+def _changelog_key(entry) -> str:
+    return (entry.get("link") or entry.get("id") or "").strip()
 
 
 def _build_feed_messages(feed_title: str, entries_with_changelog: list) -> list[str]:
@@ -41,7 +47,7 @@ def _build_feed_messages(feed_title: str, entries_with_changelog: list) -> list[
         feed_title: Display title of the feed.
         entries_with_changelog: List of (entry_dict, changelog_line_or_None) tuples.
     """
-    normalized_feed_title = _remove_blank_lines(feed_title or "Untitled Feed", joiner=" ").strip() or "Untitled Feed"
+    normalized_feed_title = normalize_multiline_text(feed_title or "Untitled Feed", joiner=" ").strip() or "Untitled Feed"
     safe_feed_title = escape(_truncate_text(normalized_feed_title, 256), quote=False)
     header = f"<b>{safe_feed_title}</b>"
 
@@ -49,10 +55,9 @@ def _build_feed_messages(feed_title: str, entries_with_changelog: list) -> list[
     current_message = f"{header}\n"
 
     for entry, changelog_line in entries_with_changelog:
-        raw_title = _remove_blank_lines(entry.get("title") or "No Title", joiner=" ").strip() or "No Title"
-        safe_title = escape(_truncate_text(raw_title, MAX_ENTRY_TITLE_LENGTH), quote=False)
+        safe_title = escape(_truncate_text(normalize_entry_title(entry), MAX_ENTRY_TITLE_LENGTH), quote=False)
 
-        raw_link = _remove_blank_lines(entry.get("link") or "", joiner="").strip()
+        raw_link = normalize_multiline_text(entry.get("link") or "", joiner="").strip()
         safe_link = escape(_truncate_text(raw_link, MAX_ENTRY_LINK_LENGTH), quote=True)
 
         if safe_link:
@@ -94,8 +99,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
 
         try:
             response = await fetch_feed_with_retry(http_client, feed_url, headers=headers)
-        except ValueError as e:
-            # SSRF guard rejected the URL/redirect target, or too many redirects
+        except UnsafeFeedURLError as e:
             logger.warning(f"Skipping unsafe/invalid feed URL {feed_url}: {e}")
             return messages_to_send
         except httpx.TimeoutException:
@@ -123,27 +127,22 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
         modified = response.headers.get('Last-Modified')
         latest_title = d.feed.get('title', None)
 
-        store.feeds.update(feed_url, last_etag=etag, last_modified=modified, title=latest_title)
+        store.feeds.update(
+            feed_url,
+            last_etag=etag,
+            last_modified=modified,
+            title=latest_title,
+            last_check_time=current_time,
+        )
 
         # Determine new entries via persistent entry-key tracking.
         # Unlike publish-time comparison, this also handles feeds whose entries
         # lack published/updated timestamps (previously dropped silently).
+        # On a feed's first check the store seeds the keys and reports nothing
+        # new, so history is never spammed.
         entry_key_pairs = [(entry, build_entry_key(entry)) for entry in d.entries]
-        all_keys = [key for _, key in entry_key_pairs]
-
-        # First check (new feed) or migration of an existing feed with no recorded
-        # keys yet: seed the keys and push nothing, so history is never spammed.
-        is_first_check = feed_data.last_check_time is None or store.feed_entries.count(feed_url) == 0
-        if is_first_check:
-            store.feed_entries.seed(feed_url, all_keys)
-            store.feeds.update(feed_url, last_check_time=current_time)
-            return messages_to_send
-
-        new_keys = store.feed_entries.register_and_get_new(feed_url, all_keys)
+        new_keys = store.feed_entries.register_and_get_new(feed_url, [key for _, key in entry_key_pairs])
         new_entries = [entry for entry, key in entry_key_pairs if key in new_keys]
-
-        # Update last check time
-        store.feeds.update(feed_url, last_check_time=current_time)
 
         # Prepare messages for subscribers
         if new_entries:
@@ -163,15 +162,16 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
             changelog_map: dict[str, str | None] = {}
             if github_feed:
                 for entry in entries_to_push:
-                    key = (entry.get("link") or entry.get("id") or "").strip()
+                    key = _changelog_key(entry)
                     if key and key not in changelog_map:
                         changelog_map[key] = await get_changelog_link(http_client, feed_url, entry)
+
+            ordered_entries = list(reversed(entries_to_push))  # Oldest first
+            candidate_titles = [(entry.get('title') or 'No Title') for entry in ordered_entries]
 
             # Process each subscriber separately for deduplication
             total_filtered = 0
             for chat_id in subscribers:
-                ordered_entries = list(reversed(entries_to_push))  # Oldest first
-                candidate_titles = [(entry.get('title') or 'No Title') for entry in ordered_entries]
                 allowed_titles = store.messages.filter_and_record_batch(feed_url, chat_id, candidate_titles)
 
                 filtered_entries = []
@@ -187,7 +187,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
 
                 if filtered_entries:
                     entries_with_changelog = [
-                        (entry, changelog_map.get((entry.get("link") or entry.get("id") or "").strip()) if github_feed else None)
+                        (entry, changelog_map.get(_changelog_key(entry)) if github_feed else None)
                         for entry in filtered_entries
                     ]
                     for combined_message in _build_feed_messages(feed_title, entries_with_changelog):

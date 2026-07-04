@@ -79,6 +79,22 @@ class _BaseOperations:
         )
         return cursor.fetchone() is not None
     
+    def _delete_older_than(self, table: str, ts_column: str, window: int, label: str) -> int:
+        """删除时间戳早于 now - window 的记录，返回删除数量"""
+        cutoff_time = time.time() - window
+
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE {ts_column} < ?",
+                (cutoff_time,)
+            )
+            deleted_count = cursor.rowcount
+
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} {label}")
+
+            return deleted_count
+
     @staticmethod
     def _build_update(updates: dict) -> tuple:
         """构建 UPDATE SET 子句"""
@@ -354,20 +370,11 @@ class MessageHistoryOperations(_BaseOperations):
     
     def cleanup_old(self, window_seconds: Optional[int] = None) -> int:
         """清理过期的消息记录，返回删除的记录数"""
-        window = window_seconds or self.DEDUP_WINDOW
-        cutoff_time = time.time() - window
-        
-        with self._transaction() as conn:
-            cursor = conn.execute(
-                "DELETE FROM message_history WHERE timestamp < ?",
-                (cutoff_time,)
-            )
-            deleted_count = cursor.rowcount
-            
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} old message records")
-            
-            return deleted_count
+        return self._delete_older_than(
+            "message_history", "timestamp",
+            window_seconds or self.DEDUP_WINDOW,
+            "old message records",
+        )
 
 
 # ============================================================================
@@ -384,31 +391,30 @@ class FeedEntryOperations(_BaseOperations):
     # 条目 key 保留期（秒）。按 last_seen 修剪：仅清理早已离开 Feed 的条目。
     RETENTION = 7_776_000  # 90 天
 
-    def count(self, feed_url: str) -> int:
-        """返回该 Feed 已记录的条目 key 数量。"""
-        conn = self._get_conn()
-        row = conn.execute(
-            "SELECT COUNT(*) AS c FROM feed_entries WHERE feed_url = ?",
-            (feed_url,)
-        ).fetchone()
-        return row["c"] if row else 0
-
     def register_and_get_new(self, feed_url: str, keys: List[str]) -> Set[str]:
-        """记录本次见到的所有 key（刷新 last_seen），返回其中此前未见过的 key 集合。"""
+        """记录本次见到的所有 key（刷新 last_seen），返回其中此前未见过的 key 集合。
+
+        该 Feed 尚无任何记录时（首次检查，或迁移到 key 追踪的既有 Feed），
+        仅记录 key 并返回空集合，确保历史条目不会被当作新条目推送。
+        """
         if not keys:
             return set()
 
         unique_keys = list(dict.fromkeys(keys))
-        placeholders = ", ".join("?" for _ in unique_keys)
-        conn = self._get_conn()
-        existing = {
-            row["entry_key"]
-            for row in conn.execute(
-                f"SELECT entry_key FROM feed_entries "
-                f"WHERE feed_url = ? AND entry_key IN ({placeholders})",
-                [feed_url, *unique_keys],
-            )
-        }
+        had_prior_keys = self._exists("feed_entries", "feed_url = ?", (feed_url,))
+
+        existing: Set[str] = set()
+        if had_prior_keys:
+            placeholders = ", ".join("?" for _ in unique_keys)
+            conn = self._get_conn()
+            existing = {
+                row["entry_key"]
+                for row in conn.execute(
+                    f"SELECT entry_key FROM feed_entries "
+                    f"WHERE feed_url = ? AND entry_key IN ({placeholders})",
+                    [feed_url, *unique_keys],
+                )
+            }
 
         now = time.time()
         with self._transaction() as conn:
@@ -419,28 +425,18 @@ class FeedEntryOperations(_BaseOperations):
                 DO UPDATE SET last_seen = excluded.last_seen
             """, [(feed_url, key, now, now) for key in unique_keys])
 
-        return {key for key in unique_keys if key not in existing}
+        if not had_prior_keys:
+            return set()
 
-    def seed(self, feed_url: str, keys: List[str]) -> None:
-        """记录 key 但不返回新条目（用于首次检查或迁移既有 Feed，避免推送历史）。"""
-        self.register_and_get_new(feed_url, keys)
+        return {key for key in unique_keys if key not in existing}
 
     def cleanup_old(self, window_seconds: Optional[int] = None) -> int:
         """清理长期未再出现的条目 key，返回删除的记录数。"""
-        window = window_seconds or self.RETENTION
-        cutoff_time = time.time() - window
-
-        with self._transaction() as conn:
-            cursor = conn.execute(
-                "DELETE FROM feed_entries WHERE last_seen < ?",
-                (cutoff_time,)
-            )
-            deleted_count = cursor.rowcount
-
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} stale feed entry keys")
-
-            return deleted_count
+        return self._delete_older_than(
+            "feed_entries", "last_seen",
+            window_seconds or self.RETENTION,
+            "stale feed entry keys",
+        )
 
 
 # ============================================================================

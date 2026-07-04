@@ -1,13 +1,11 @@
 import asyncio
-import calendar
 import hashlib
 import ipaddress
 import logging
 import os
 import socket
-import time
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from telegram import ChatMember
@@ -21,49 +19,42 @@ FEED_REQUEST_TIMEOUT = 10.0
 FEED_FETCH_RETRIES = 2
 FEED_RETRY_BACKOFF_SECONDS = 0.6
 FEED_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
-ENTRY_TIME_FIELDS = ("published_parsed", "updated_parsed", "created_parsed")
 
 # SSRF guard / redirect handling
 ALLOWED_URL_SCHEMES = {"http", "https"}
-REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
 MAX_FEED_REDIRECTS = 5
+
+
+class UnsafeFeedURLError(ValueError):
+    """Raised when a feed URL is rejected by the SSRF guard or redirect limit."""
 
 
 async def assert_public_url(url: str) -> None:
     """SSRF guard: reject non-HTTP(S) URLs and hosts resolving to non-public IPs.
 
-    Raises ValueError when the URL scheme is unsupported, the host cannot be
-    resolved, or any resolved address is private/loopback/link-local/reserved/
-    multicast/unspecified.
+    Raises UnsafeFeedURLError when the URL scheme is unsupported, the host
+    cannot be resolved, or any resolved address is not globally routable.
     """
     parsed = urlparse(url)
     scheme = (parsed.scheme or "").lower()
     if scheme not in ALLOWED_URL_SCHEMES:
-        raise ValueError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
+        raise UnsafeFeedURLError(f"unsupported URL scheme: {parsed.scheme or '(none)'}")
 
     host = parsed.hostname
     if not host:
-        raise ValueError("URL has no host")
+        raise UnsafeFeedURLError("URL has no host")
 
-    port = parsed.port or (443 if scheme == "https" else 80)
     try:
         infos = await asyncio.to_thread(
-            socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM
+            socket.getaddrinfo, host, None, 0, socket.SOCK_STREAM
         )
     except socket.gaierror as exc:
-        raise ValueError(f"cannot resolve host {host}: {exc}") from exc
+        raise UnsafeFeedURLError(f"cannot resolve host {host}: {exc}") from exc
 
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise ValueError(f"blocked non-public address {ip} for host {host}")
+        if not ip.is_global:
+            raise UnsafeFeedURLError(f"blocked non-public address {ip} for host {host}")
 
 
 def build_feed_request_headers(last_etag: Optional[str] = None, last_modified: Optional[str] = None) -> dict:
@@ -152,16 +143,13 @@ async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, header
         await assert_public_url(current_url)
         response = await _request_with_retry(http_client, current_url, headers)
 
-        if response.status_code in REDIRECT_STATUS_CODES:
-            location = response.headers.get("location")
-            if not location:
-                return response
-            current_url = urljoin(current_url, location)
+        if response.has_redirect_location and response.next_request:
+            current_url = str(response.next_request.url)
             continue
 
         return response
 
-    raise ValueError(f"too many redirects while fetching {url}")
+    raise UnsafeFeedURLError(f"too many redirects while fetching {url}")
 
 
 def normalize_multiline_text(text: str, joiner: str = " ") -> str:
@@ -174,26 +162,6 @@ def normalize_entry_title(entry) -> str:
     """Return a safe, normalized title for a feed entry."""
     title = normalize_multiline_text(entry.get("title") or "No Title", joiner=" ").strip()
     return title or "No Title"
-
-
-def extract_entry_time(entry) -> Optional[int]:
-    """Extract a UTC timestamp from a parsed feed entry if one exists."""
-    for time_field in ENTRY_TIME_FIELDS:
-        time_struct = entry.get(time_field) or getattr(entry, time_field, None)
-        if not time_struct:
-            continue
-
-        try:
-            return calendar.timegm(time_struct)
-        except (ValueError, OverflowError, TypeError):
-            continue
-
-    return None
-
-
-def init_feed_check_time(store, url: str) -> None:
-    """Set last_check_time for a feed to now, preventing history from being pushed."""
-    store.feeds.update(url, last_check_time=time.time())
 
 
 def _extract_entry_content(entry) -> str:

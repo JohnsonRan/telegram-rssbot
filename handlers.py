@@ -2,7 +2,7 @@ import asyncio
 import logging
 from html import escape
 from io import BytesIO
-from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import quoteattr
 
 import feedparser
 import httpx
@@ -14,9 +14,9 @@ from data_store import Chat, Feed, store
 from utils import (
     FEED_REQUEST_TIMEOUT,
     Messages,
+    UnsafeFeedURLError,
     build_feed_request_headers,
     fetch_feed_with_retry,
-    init_feed_check_time,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,17 +97,12 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(Messages.ALREADY_SUBSCRIBED)
             return
 
-        # Add feed to database (track whether it already existed for other chats)
-        feed_existed = store.feeds.get(url) is not None
+        # Add feed to database. New-entry detection seeds itself on the feed's
+        # first poll (feed_entries), so no check-time bookkeeping is needed here.
         store.feeds.create(Feed(url=url, title=feed_title))
 
         # Subscribe chat to feed
         store.subscriptions.subscribe(chat_id, url)
-
-        # Only seed the check time for a brand-new feed. Resetting it for an
-        # already-tracked feed would drop entries pending for existing subscribers.
-        if not feed_existed:
-            init_feed_check_time(store, url)
 
         safe_feed_title = escape(feed_title)
         await msg.edit_text(
@@ -115,8 +110,7 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
 
-    except ValueError as e:
-        # Raised by the SSRF guard (bad scheme / non-public host) or too many redirects
+    except UnsafeFeedURLError as e:
         logger.warning(f"Rejected feed URL {url}: {e}")
         await msg.edit_text(f"{Messages.INVALID_FEED}\n{str(e)[:100]}")
     except httpx.TimeoutException:
@@ -237,10 +231,10 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         opml_content = '<?xml version="1.0" encoding="UTF-8"?>\n<opml version="1.0">\n<head><title>RSS Export</title></head>\n<body>\n'
 
         for feed in feeds:
-            # Escape &, <, > and " so titles/URLs can't break the OPML attributes
-            title = xml_escape(feed.title or feed.url, {'"': '&quot;'})
-            url = xml_escape(feed.url, {'"': '&quot;'})
-            opml_content += f'  <outline text="{title}" title="{title}" type="rss" xmlUrl="{url}"/>\n'
+            # quoteattr escapes and quotes, so titles/URLs can't break the OPML attributes
+            title = quoteattr(feed.title or feed.url)
+            url = quoteattr(feed.url)
+            opml_content += f'  <outline text={title} title={title} type="rss" xmlUrl={url}/>\n'
 
         opml_content += '</body>\n</opml>'
 
@@ -288,31 +282,20 @@ async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status_msg = await update.message.reply_text(Messages.IMPORTING.format(len(parsed.feeds)))
 
-        newly_created = []
         subscribed_count = 0
 
-        # Import feeds
+        # Import feeds. New-entry detection seeds itself on each feed's first
+        # poll (feed_entries), so no check-time bookkeeping is needed here.
         for item in parsed.feeds:
             url = item.url
             if not url:
                 continue
 
-            # Add feed (remember whether it already existed for other chats)
-            feed_existed = store.feeds.get(url) is not None
             store.feeds.create(Feed(url=url, title=item.title or url))
 
             # Subscribe if not already
             if store.subscriptions.subscribe(chat_id, url):
                 subscribed_count += 1
-                if not feed_existed:
-                    newly_created.append(url)
-
-        # Only seed check time for brand-new feeds (don't disturb existing subscribers)
-        for url in newly_created:
-            try:
-                init_feed_check_time(store, url)
-            except Exception as e:
-                logger.error(f"Error initializing feed {url} during import: {e}")
 
         # Send result
         await status_msg.edit_text(Messages.IMPORT_SUCCESS.format(subscribed_count))
