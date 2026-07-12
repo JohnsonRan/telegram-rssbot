@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -17,7 +18,14 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+from utils import trim_memory
+
 logger = logging.getLogger(__name__)
+
+# /sticker is public, and one conversion can hold tens of MB of decoded RGBA
+# frames. A single dedicated worker serializes conversions so concurrent
+# requests queue up instead of multiplying peak memory across pool threads.
+_CONVERSION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sticker")
 
 
 class StickerKind(str, Enum):
@@ -123,6 +131,8 @@ async def sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status.delete()
         except Exception:
             logger.debug("Could not delete sticker conversion status message", exc_info=True)
+        # Frame buffers are freed now; hand the pages back to the OS.
+        trim_memory()
 
 
 def _extract_source(message):
@@ -218,7 +228,10 @@ async def convert_to_file(
     kind: StickerKind,
     settings: StickerConverterSettings,
 ) -> ConversionResult:
-    return await asyncio.to_thread(_convert_to_file, input_path, output_path, kind, settings)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _CONVERSION_EXECUTOR, _convert_to_file, input_path, output_path, kind, settings
+    )
 
 
 def _convert_to_file(

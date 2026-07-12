@@ -46,8 +46,10 @@ Single SQLite-backed process. Module map:
   `store.chats`, `store.feeds`, `store.subscriptions`, `store.messages`, `store.feed_entries`.
   Schema is created on first connection in `_init_database`.
 - **utils.py** — shared feed-fetch helpers (`build_feed_request_headers`,
-  `fetch_feed_with_retry` with backoff on retryable statuses and the SSRF guard), entry-key
-  extraction (`build_entry_key`), the `Messages` text constants, and the **permission layer**.
+  `fetch_feed_with_retry` with backoff on retryable statuses, the SSRF guard, and a streaming
+  response-size cap), `parse_feed_bytes` (feedparser on a dedicated single-thread executor),
+  `trim_memory` (glibc `malloc_trim`, no-op elsewhere), entry-key extraction
+  (`build_entry_key`), the `Messages` text constants, and the **permission layer**.
 - **github_enricher.py** — for `*/releases.atom` feeds, appends a "Full Changelog" compare
   link, parsed from entry HTML first, falling back to the GitHub Releases API.
 - **sticker_converter.py** — `/sticker`: static→PNG (Pillow), animated `.tgs`→GIF
@@ -73,10 +75,17 @@ Single SQLite-backed process. Module map:
   (`subscriptions.unsubscribe`).
 - **Conditional GET:** ETag / Last-Modified are stored per feed and replayed as
   `If-None-Match` / `If-Modified-Since`; a 304 short-circuits processing.
+- **Memory bounds:** feed responses are streamed with a hard cap
+  (`MAX_FEED_RESPONSE_BYTES`, oversize raises `FeedTooLargeError`); feed parsing and sticker
+  conversion each run on their own single-worker executor so peak memory is one parse tree /
+  one conversion at a time; `trim_memory()` runs after each poll cycle and sticker conversion
+  to return freed pages to the OS (glibc only).
 
 ## Conventions
 
-Code is async throughout (handlers + job). Blocking work (`feedparser.parse`, sticker
-conversion) is offloaded with `asyncio.to_thread`. User-facing text lives in `utils.Messages`;
+Code is async throughout (handlers + job). Blocking work is offloaded to threads: feed
+parsing via `utils.parse_feed_bytes` and sticker conversion via a module-level single-worker
+executor (both deliberately serialized for memory reasons — don't switch them back to
+`asyncio.to_thread`). User-facing text lives in `utils.Messages`;
 inline user-facing strings are Chinese in places (sticker errors, http.cat fallbacks). Telegram
 messages use `parse_mode='HTML'` and all dynamic text is passed through `html.escape`.

@@ -4,7 +4,6 @@ import random
 import time
 from html import escape
 
-import feedparser
 import httpx
 
 from data_store import store
@@ -16,6 +15,8 @@ from utils import (
     fetch_feed_with_retry,
     normalize_entry_title,
     normalize_multiline_text,
+    parse_feed_bytes,
+    trim_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ async def fetch_single_feed(feed_url: str, feed_data: dict, current_time: float,
             return messages_to_send
 
         # Parse feed content
-        d = await asyncio.to_thread(feedparser.parse, response.content)
+        d = await parse_feed_bytes(response.content)
 
         # Update feed metadata
         etag = response.headers.get('ETag')
@@ -297,3 +298,7 @@ async def check_updates(context):
 
     if messages:
         logger.info(f"Sent {len(messages)} messages to subscribers")
+
+    # Return the cycle's freed parse/response memory to the OS instead of
+    # letting the allocator retain it as an ever-growing high-water mark.
+    trim_memory()

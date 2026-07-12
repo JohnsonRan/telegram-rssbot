@@ -1,12 +1,15 @@
 import asyncio
+import ctypes
 import hashlib
 import ipaddress
 import logging
 import os
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import urlparse
 
+import feedparser
 import httpx
 from telegram import ChatMember
 from telegram.ext import filters
@@ -24,9 +27,17 @@ FEED_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 ALLOWED_URL_SCHEMES = {"http", "https"}
 MAX_FEED_REDIRECTS = 5
 
+# Hard cap on a single feed response body. Without it a huge (or hostile) feed
+# is fully buffered in memory every poll cycle.
+MAX_FEED_RESPONSE_BYTES = 10 * 1024 * 1024
+
 
 class UnsafeFeedURLError(ValueError):
     """Raised when a feed URL is rejected by the SSRF guard or redirect limit."""
+
+
+class FeedTooLargeError(UnsafeFeedURLError):
+    """Raised when a feed response exceeds MAX_FEED_RESPONSE_BYTES."""
 
 
 async def assert_public_url(url: str) -> None:
@@ -67,6 +78,30 @@ def build_feed_request_headers(last_etag: Optional[str] = None, last_modified: O
     return headers
 
 
+async def _fetch_capped(http_client: httpx.AsyncClient, url: str, headers: Optional[dict]) -> httpx.Response:
+    """GET without redirects, aborting the download once the body exceeds MAX_FEED_RESPONSE_BYTES."""
+    request = http_client.build_request("GET", url, headers=headers, timeout=FEED_REQUEST_TIMEOUT)
+    response = await http_client.send(request, stream=True, follow_redirects=False)
+    try:
+        declared_size = response.headers.get("Content-Length")
+        if declared_size and declared_size.isdigit() and int(declared_size) > MAX_FEED_RESPONSE_BYTES:
+            raise FeedTooLargeError(
+                f"feed response declares {declared_size} bytes (limit {MAX_FEED_RESPONSE_BYTES})"
+            )
+
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            body.extend(chunk)
+            if len(body) > MAX_FEED_RESPONSE_BYTES:
+                raise FeedTooLargeError(f"feed response exceeds {MAX_FEED_RESPONSE_BYTES} bytes")
+
+        # Expose the capped body via response.content for downstream callers.
+        response._content = bytes(body)
+        return response
+    finally:
+        await response.aclose()
+
+
 async def _request_with_retry(http_client: httpx.AsyncClient, url: str, headers: Optional[dict] = None) -> httpx.Response:
     """Fetch a single target (no redirect following) with a small retry budget."""
     last_error = None
@@ -75,9 +110,7 @@ async def _request_with_retry(http_client: httpx.AsyncClient, url: str, headers:
     for attempt in range(total_attempts):
         attempt_no = attempt + 1
         try:
-            response = await http_client.get(
-                url, headers=headers, timeout=FEED_REQUEST_TIMEOUT, follow_redirects=False
-            )
+            response = await _fetch_capped(http_client, url, headers)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last_error = exc
             if attempt >= FEED_FETCH_RETRIES:
@@ -150,6 +183,42 @@ async def fetch_feed_with_retry(http_client: httpx.AsyncClient, url: str, header
         return response
 
     raise UnsafeFeedURLError(f"too many redirects while fetching {url}")
+
+
+# feedparser is GIL-bound, so parsing in parallel adds no throughput; a single
+# dedicated worker keeps peak memory to one parse tree at a time instead of up
+# to MAX_CONCURRENT_FEEDS, and confines allocator churn to one thread instead
+# of spreading high-water marks across the default executor's threads.
+_FEED_PARSE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="feedparse")
+
+
+async def parse_feed_bytes(content: bytes):
+    """Parse raw feed bytes with feedparser on the dedicated parser thread."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_FEED_PARSE_EXECUTOR, feedparser.parse, content)
+
+
+_libc = None  # None = untried, False = unavailable (non-glibc platform)
+
+
+def trim_memory() -> None:
+    """Ask glibc to return freed heap pages to the OS (no-op elsewhere).
+
+    CPython frees feed parse trees and sticker frames, but glibc keeps the
+    pages in its arenas, so long-running RSS only ever grows. malloc_trim
+    releases that retained memory back to the kernel.
+    """
+    global _libc
+    if _libc is None:
+        try:
+            _libc = ctypes.CDLL("libc.so.6")
+        except OSError:
+            _libc = False
+    if _libc:
+        try:
+            _libc.malloc_trim(0)
+        except Exception:
+            logger.debug("malloc_trim failed", exc_info=True)
 
 
 def normalize_multiline_text(text: str, joiner: str = " ") -> str:

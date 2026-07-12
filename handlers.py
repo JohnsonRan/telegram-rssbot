@@ -1,10 +1,8 @@
-import asyncio
 import logging
 from html import escape
 from io import BytesIO
 from xml.sax.saxutils import quoteattr
 
-import feedparser
 import httpx
 import listparser
 from telegram import Document, Update
@@ -17,6 +15,7 @@ from utils import (
     UnsafeFeedURLError,
     build_feed_request_headers,
     fetch_feed_with_retry,
+    parse_feed_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,7 +74,7 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Validate feed content by parsing response body
-        d = await asyncio.to_thread(feedparser.parse, response.content)
+        d = await parse_feed_bytes(response.content)
 
         # Check if feed is valid
         if not d.entries and not d.feed.get('title') and not d.version:
