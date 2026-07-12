@@ -1,6 +1,4 @@
 import os
-import sys
-import signal
 import logging
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, CommandHandler
@@ -34,26 +32,12 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 
-def cleanup_handler(signum, frame):
-    """Handle cleanup on shutdown."""
-    logger.info("Shutting down bot...")
-    try:
-        store.close()
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
-    sys.exit(0)
-
-
 def main():
     if not TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found in .env")
         return
 
     print("Initializing bot...")
-    
-    # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, cleanup_handler)
-    signal.signal(signal.SIGTERM, cleanup_handler)
 
     # Build application with lifecycle hooks
     async def post_init(application):
@@ -80,6 +64,10 @@ def main():
         if no_http_client:
             await no_http_client.aclose()
             logger.info("No-as-a-service HTTP client closed")
+        try:
+            store.close()
+        except Exception as e:
+            logger.error(f"Error closing data store: {e}")
     
     app = (
         ApplicationBuilder()
