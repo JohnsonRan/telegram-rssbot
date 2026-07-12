@@ -9,7 +9,7 @@ from data_store import store
 from handlers import start, add_feed, list_feeds, no_as_a_service, remove_feed, export_opml, import_opml
 from rss_checker import check_updates
 from sticker_converter import sticker
-from utils import FEED_REQUEST_TIMEOUT, admin_filter
+from utils import FEED_REQUEST_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +89,14 @@ def main():
         .build()
     )
 
-    # Command handlers (with admin_filter for protected commands)
-    app.add_handler(CommandHandler("start", start, filters=admin_filter))
-    app.add_handler(CommandHandler("help", start, filters=admin_filter))
-    app.add_handler(CommandHandler("add", add_feed, filters=admin_filter))
-    app.add_handler(CommandHandler("list", list_feeds, filters=admin_filter))
-    app.add_handler(CommandHandler("remove", remove_feed, filters=admin_filter))
-    app.add_handler(CommandHandler("export", export_opml, filters=admin_filter))
-    app.add_handler(CommandHandler("import", import_opml, filters=admin_filter))
+    # Command handlers (protected ones are wrapped with @require_admin in handlers.py)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("add", add_feed))
+    app.add_handler(CommandHandler("list", list_feeds))
+    app.add_handler(CommandHandler("remove", remove_feed))
+    app.add_handler(CommandHandler("export", export_opml))
+    app.add_handler(CommandHandler("import", import_opml))
     app.add_handler(CommandHandler("no", no_as_a_service))
     app.add_handler(CommandHandler("sticker", sticker))
 

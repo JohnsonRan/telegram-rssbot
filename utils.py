@@ -1,5 +1,6 @@
 import asyncio
 import ctypes
+import functools
 import hashlib
 import ipaddress
 import logging
@@ -12,7 +13,6 @@ from urllib.parse import urlparse
 import feedparser
 import httpx
 from telegram import ChatMember
-from telegram.ext import filters
 
 logger = logging.getLogger(__name__)
 
@@ -267,40 +267,55 @@ def get_whitelist():
     return [int(x.strip()) for x in wl.split(",") if x.strip().isdigit()]
 
 
-class AdminFilter(filters.MessageFilter):
-    """Custom filter to check if user has admin permissions."""
+async def _is_admin(update) -> bool:
+    """Check whether the update's sender may use protected commands.
 
-    def __init__(self):
-        super().__init__()
-        self.name = "AdminFilter"
+    Private chats require whitelist membership; groups/channels require
+    owner/administrator status.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
 
-    async def filter(self, message):
-        """Check if user has permission to use the command."""
-        user = message.from_user
-        chat = message.chat
-
-        if not user:
-            return False
-
-        # Private Chat: Whitelist check
-        if chat.type == 'private':
-            whitelist = get_whitelist()
-            return user.id in whitelist
-
-        # Group/Channel: Admin check
-        if chat.type in ['group', 'supergroup', 'channel']:
-            try:
-                member = await chat.get_member(user.id)
-                return member.status in [ChatMember.OWNER, ChatMember.ADMINISTRATOR]
-            except Exception as e:
-                logger.error(f"Error checking permissions: {e}")
-                return False
-
+    if not chat or not user:
         return False
 
+    # Private Chat: Whitelist check
+    if chat.type == 'private':
+        return user.id in get_whitelist()
 
-# Create filter instance
-admin_filter = AdminFilter()
+    # Group/Channel: Admin check
+    if chat.type in ('group', 'supergroup', 'channel'):
+        try:
+            member = await chat.get_member(user.id)
+            return member.status in (ChatMember.OWNER, ChatMember.ADMINISTRATOR)
+        except Exception as e:
+            logger.error(f"Error checking permissions: {e}")
+            return False
+
+    return False
+
+
+def require_admin(handler):
+    """Decorator gating a handler on _is_admin; unauthorized commands are ignored.
+
+    This must be a handler decorator, not a PTB message filter: filters run
+    synchronously, so an async filter would return a coroutine — always truthy —
+    and let every user through.
+    """
+    @functools.wraps(handler)
+    async def wrapper(update, context):
+        if await _is_admin(update):
+            return await handler(update, context)
+        user = update.effective_user
+        chat = update.effective_chat
+        logger.warning(
+            "Ignoring unauthorized command from user %s in chat %s",
+            user.id if user else "?",
+            chat.id if chat else "?",
+        )
+        return None
+
+    return wrapper
 
 
 class Messages:

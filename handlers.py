@@ -16,6 +16,7 @@ from utils import (
     build_feed_request_headers,
     fetch_feed_with_retry,
     parse_feed_bytes,
+    require_admin,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 NO_AS_A_SERVICE_URL = "https://naas.isalman.dev/no"
 
 
+@require_admin
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start and /help commands."""
     chat_id = update.effective_chat.id
@@ -40,6 +42,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
+@require_admin
 async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /add command to subscribe to a feed."""
     chat_id = update.effective_chat.id
@@ -126,6 +129,7 @@ async def add_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await http_client.aclose()
 
 
+@require_admin
 async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /list command to show all subscribed feeds."""
     chat_id = update.effective_chat.id
@@ -186,6 +190,7 @@ async def no_as_a_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await http_client.aclose()
 
 
+@require_admin
 async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /remove command to unsubscribe from a feed."""
     chat_id = update.effective_chat.id
@@ -215,6 +220,7 @@ async def remove_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
+@require_admin
 async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /export command to export feeds as OPML."""
     chat_id = update.effective_chat.id
@@ -247,6 +253,7 @@ async def export_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(Messages.ERROR_OCCURRED)
 
 
+@require_admin
 async def import_opml(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /import command to import feeds from OPML."""
     chat_id = update.effective_chat.id

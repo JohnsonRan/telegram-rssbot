@@ -57,10 +57,12 @@ Single SQLite-backed process. Module map:
 
 ## Key invariants
 
-- **Permissions:** `/start /help /add /list /remove /export /import` are gated by `admin_filter`
-  (registered in bot.py). The filter requires whitelist membership in private chats and
-  owner/admin status in groups/channels. `/no` and `/sticker` are intentionally **public** (no
-  filter).
+- **Permissions:** `/start /help /add /list /remove /export /import` handlers are wrapped with
+  `utils.require_admin`, which requires whitelist membership in private chats and owner/admin
+  status in groups/channels; unauthorized commands are silently ignored (logged). This must
+  stay a handler decorator — PTB message filters run synchronously, so an async filter returns
+  a truthy coroutine and lets everyone through. `/no` and `/sticker` are intentionally
+  **public** (no gating).
 - **No history spam:** new entries are detected via persistent per-feed entry keys
   (`feed_entries` table, `build_entry_key`). On a feed's first poll,
   `feed_entries.register_and_get_new` seeds all current keys and reports nothing new, so
