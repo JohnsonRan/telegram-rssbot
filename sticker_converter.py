@@ -458,7 +458,10 @@ def _extract_video_frames(input_path: Path, size: int, fps: int) -> tuple[list[I
                 "-vf",
                 # Scale inside ffmpeg so extracted frames are already small;
                 # later profiles downscale these in memory instead of re-decoding.
-                f"fps={fps},scale={size}:{size}:force_original_aspect_ratio=decrease:flags=lanczos",
+                # min(iw/ih, size) keeps sources smaller than the cap at their
+                # original dimensions instead of upscaling them.
+                f"fps={fps},scale=w=min(iw\\,{size}):h=min(ih\\,{size})"
+                ":force_original_aspect_ratio=decrease:flags=lanczos",
                 str(frame_pattern),
             ],
             check=True,
@@ -523,12 +526,17 @@ def _convert_tgs_with_rlottie(
                 duration_ms=round(total_frames / source_fps * 1000),
             )
 
+            natural_size = _tgs_natural_size(animation)
+
             for size, fps in _profiles(settings, source_info):
                 try:
+                    render_size = _contained_size(natural_size or (size, size), (size, size))
                     frame_numbers, durations = _sample_frame_numbers(total_frames, source_fps, fps)
                     frames = [
                         _fit_frame(
-                            animation.render_pillow_frame(frame_num, width=size, height=size),
+                            animation.render_pillow_frame(
+                                frame_num, width=render_size[0], height=render_size[1]
+                            ),
                             size,
                             settings,
                         )
@@ -549,6 +557,16 @@ def _convert_tgs_with_rlottie(
     if _accept_oversized(output_path, settings):
         return
     raise ConversionError("TGS 动态贴纸渲染失败。") from last_error
+
+
+def _tgs_natural_size(animation) -> tuple[int, int] | None:
+    try:
+        width, height = animation.lottie_animation_get_size()
+    except Exception:
+        return None
+    if not width or not height or width <= 0 or height <= 0:
+        return None
+    return int(width), int(height)
 
 
 def _convert_tgs_with_lottie_cli(input_path: Path, output_path: Path) -> None:
@@ -675,12 +693,9 @@ def _sample_frame_numbers(total_frames: int, source_fps: float, target_fps: int)
 
 def _fit_frame(frame: Image.Image, size: int, settings: StickerConverterSettings) -> Image.Image:
     rgba = frame.convert("RGBA")
-    contained_size = _contained_size(rgba.size, (size, size))
-    contained = _resize_rgba(rgba, contained_size)
-    canvas = Image.new("RGBA", (size, size), settings.background_rgba)
-    left = (size - contained.width) // 2
-    top = (size - contained.height) // 2
-    canvas.alpha_composite(contained, (left, top))
+    contained = _resize_rgba(rgba, _contained_size(rgba.size, (size, size)))
+    canvas = Image.new("RGBA", contained.size, settings.background_rgba)
+    canvas.alpha_composite(contained)
     return canvas
 
 
@@ -689,7 +704,8 @@ def _contained_size(original: tuple[int, int], target: tuple[int, int]) -> tuple
     max_width, max_height = target
     if width <= 0 or height <= 0:
         raise ConversionError("图片尺寸无效。")
-    scale = min(max_width / width, max_height / height)
+    # Only shrink to fit the cap; never upscale past the source dimensions.
+    scale = min(max_width / width, max_height / height, 1)
     return max(1, round(width * scale)), max(1, round(height * scale))
 
 
